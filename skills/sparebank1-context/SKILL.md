@@ -1,7 +1,7 @@
 ---
 name: sparebank1-context
 description: Build and maintain a personal finance context for the `sb1` CLI (SpareBank 1) by running a short onboarding interview over the user's own accounts and transactions, then saving the answers to a private, git-ignored file the agent reads at the start of future finance sessions. Captures the meaning the bank can't know — which inbound money is salary vs reimbursement, what each account is for, what's work-expensed, split with a partner, or a subscription to cancel. Use when the user wants to personalize sb1, set up or refresh their finance context, teach the agent about their money, or annotate uncategorized/ambiguous transactions.
-compatibility: Requires the `sb1` binary, installed and authenticated (see sparebank1-shared). Writes one markdown file to a user-owned path outside this repo.
+compatibility: Requires the `sb1` binary, installed and authenticated (see sparebank1-shared). Writes a profile-specific markdown file to a user-owned path outside this repo.
 ---
 
 # sparebank1-context
@@ -19,9 +19,15 @@ layer* the bank cannot infer, and nothing more.
 This skill's *mechanism* is public (it ships in a public repo and installs for
 anyone), but the *answers are private personal data*. Therefore:
 
-- **Write the context file to a user-owned path outside this repo.** Default:
-  `~/.config/sparebank1-cli/context.md` (alongside where the `file` secret store
-  writes). Override with the `SB1_CONTEXT_FILE` environment variable.
+- **Write the context file to a user-owned path outside this repo.** New profile
+  contexts live at `~/.config/sparebank1-cli/contexts/<profile-hex>/context.md`,
+  where `<profile-hex>` is the UTF-8 bytes of the profile name encoded as
+  lowercase hexadecimal. Override with `SB1_CONTEXT_FILE` for an explicitly
+  selected context file.
+- `sb1 status --json` reports `legacyContext: true` for the profile that adopted
+  a previous single-profile login. For that profile, keep using the existing
+  `~/.config/sparebank1-cli/context.md` in place. Do not move, overwrite, or
+  associate it with a different profile when the default changes.
 - **Never** write answers, balances, account numbers, or counterparties into
   this repository, a commit, a PR, or any shared/cloud-synced location. Treat the
   file like the plaintext `file` secret store: keep it off backups and out of
@@ -34,9 +40,21 @@ anyone), but the *answers are private personal data*. Therefore:
 Resolve the path once at the start:
 
 ```bash
-ctx="${SB1_CONTEXT_FILE:-$HOME/.config/sparebank1-cli/context.md}"
+profile="<profile selected for this finance session>"
+legacy_context="<legacyContext value from sb1 status --json>"
+if [ "$legacy_context" = true ]; then
+  default_ctx="$HOME/.config/sparebank1-cli/context.md"
+else
+  profile_hex="$(printf '%s' "$profile" | od -An -tx1 | tr -d ' \n')"
+  default_ctx="$HOME/.config/sparebank1-cli/contexts/$profile_hex/context.md"
+fi
+ctx="${SB1_CONTEXT_FILE:-$default_ctx}"
 mkdir -p "$(dirname "$ctx")"
 ```
+
+Choose the profile from the user's request or the default marked by `sb1 status`.
+Use that same `--profile <profile-name>` for all banking commands in this session. Never
+apply one profile's context to another profile's balances or transactions.
 
 ## When to run
 
@@ -51,12 +69,15 @@ Confirm login before pulling data:
 sb1 status   # if not logged in, ask the user to run `sb1 login` (see sparebank1-shared)
 ```
 
+When the user names a profile, check `sb1 status --profile <profile-name>`. For the
+default, use the profile marked as default by `sb1 status`.
+
 ## Step 1 — gather the data (no code change needed)
 
 Drive the interview from existing commands. Start with a short window:
 
 ```bash
-sb1 --json summary --months 3
+sb1 --json summary --months 3 --profile "$profile"
 ```
 
 From the JSON, the rows worth asking about are:
@@ -69,7 +90,7 @@ From the JSON, the rows worth asking about are:
 To see the actual Uncategorized rows behind that bucket, drill in per account:
 
 ```bash
-sb1 --json transactions -a <account> --from <start> --to <end> --classified
+sb1 --json transactions -a <account> --from <start> --to <end> --classified --profile "$profile"
 ```
 
 Each row has `category`, `recurring`, `subscription`, `counterpartyName`,
@@ -139,12 +160,12 @@ Leave out any section the user had nothing for. Don't pad it with invented rows.
 
 ## How future finance sessions use this
 
-At the **start** of any session that reasons about the user's SpareBank 1 money
+At the **start** of any session that reasons about the selected profile's SpareBank 1 money
 (budgeting, "how much did I really spend", savings rate, "what can I cancel"),
 read the context file first:
 
 ```bash
-cat "${SB1_CONTEXT_FILE:-$HOME/.config/sparebank1-cli/context.md}" 2>/dev/null
+cat "$ctx" 2>/dev/null
 ```
 
 Then apply it on top of the raw `sb1` output: net out work-reimbursed and

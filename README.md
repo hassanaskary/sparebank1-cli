@@ -117,14 +117,22 @@ cargo build --release           # ./target/release/sb1
    cp .env.example .env          # then fill in CLIENT_ID / CLIENT_SECRET
    ```
 
-4. Log in with BankID (opens your browser):
+4. Log in with BankID (opens your browser). By default, the first profile is
+   named `default`. To choose its name, add `--profile <profile-name>`:
 
    ```bash
    sb1 login
+   # Or choose a name for the first profile:
+   sb1 login --profile <profile-name>
    ```
 
-   The token is stored in your chosen secret store; you can delete `.env`
-   afterwards.
+   Replace `<profile-name>` with any local label you choose, such as `personal`.
+   After login, the credentials and token are saved to the secret store. You can
+   then delete `.env`.
+
+To add more profiles, register a separate personal client for each, then run
+`sb1 login --profile <profile-name>` with its credentials. Pass credentials
+with `--client-id` and `--client-secret` or through `.env`.
 
 ## Secret storage
 
@@ -165,11 +173,15 @@ export SB1_STORE=file
 ## Usage
 
 ```bash
-sb1 status                       # auth status, token expiry, storage backend
-sb1 hello                        # verify auth against the Hello World endpoint
+sb1 status                       # status for every profile
+sb1 status --profile <profile-name>    # status for one profile
+sb1 profile set-default <profile-name>  # choose the implicit profile
+sb1 hello                        # verify the default profile
+sb1 hello --profile <profile-name>
 
 # Accounts
-sb1 accounts                     # list (add --all to include cards/BSU/ASK/pension/currency)
+sb1 accounts                     # default profile (add --all for account types)
+sb1 accounts --profile <profile-name>
 sb1 account Brukskonto           # one account (by name, key, or number)
 sb1 account Brukskonto --details # extended details
 sb1 account Brukskonto --roles   # roles
@@ -180,7 +192,7 @@ sb1 transactions Brukskonto --days 30
 sb1 transactions Brukskonto Sparekonto --days 30  # multiple accounts
 sb1 transactions -a Brukskonto --days 30          # -a/--account works too
 sb1 transactions Brukskonto --from 2026-01-01 --to 2026-03-31
-sb1 transactions Brukskonto --classified
+sb1 transactions Brukskonto --classified --profile <profile-name>
 sb1 transaction <id>             # details for one transaction
 sb1 transactions Brukskonto --csv -o out.csv      # local CSV
 sb1 export -a Brukskonto -o booked.csv            # server-side CSV export
@@ -188,20 +200,29 @@ sb1 export -a Brukskonto -o booked.csv            # server-side CSV export
 # Transfers (always confirms first; -y to skip)
 sb1 transfer debit --from Brukskonto --to Sparekonto --amount 250
 sb1 transfer debit --from Brukskonto --to Sparekonto --amount 250 --message "Sparing"
+sb1 transfer debit --profile <profile-name> \
+  --from Brukskonto --to Sparekonto --amount 250
 sb1 transfer creditcard --from Brukskonto --credit-card-id 1034222 --amount 500
 sb1 transfer pension --from Brukskonto --policy-number 1034222 --amount 500
 
 # Machine-readable output
 sb1 --json accounts
+sb1 refresh --profile <profile-name>
+sb1 logout --profile <profile-name>
+sb1 logout --profile <profile-name> --all
 
 # Financial overview: net worth, monthly cash flow, categories, subscriptions
 sb1 summary --months 6
+sb1 summary --months 6 --profile <profile-name>
 sb1 --json summary
 
 # Mask sensitive values for screenshots (amounts, account numbers, names)
 sb1 summary --months 6 --mask
 sb1 accounts --mask
 ```
+
+Replace `<profile-name>` in these examples with the label you chose when
+creating the profile (for example, `shared`).
 
 `--classified` enriches transactions with the bank's own category, recurring,
 and subscription flags. `summary` builds on the same classification, so its
@@ -212,6 +233,11 @@ Most commands take an account as a positional argument (`sb1 account Brukskonto`
 `sb1 transactions Brukskonto`). `transactions` also accepts the older
 `-a`/`--account` flag and lets you pass several accounts (positionally or with
 repeated `-a`); omit the account entirely to query all of them.
+
+Read commands use the default profile unless `--profile` is supplied. `login`
+without `--profile` reauthenticates the current default. `refresh` and `logout`
+require `--profile` when multiple profiles exist. Transfers always use one
+profile and require `--profile` when more than one is configured.
 
 `--mask` is a global flag for sharing screenshots: it replaces sensitive values
 (amounts, account numbers, owner names, transaction descriptions, counterparties,
