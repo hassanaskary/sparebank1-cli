@@ -108,7 +108,7 @@ fn file_path(account: &str) -> PathBuf {
 }
 
 /// Read a stored value by logical account name from the active backend.
-fn kv_get(account: &str) -> Result<Option<String>> {
+pub(crate) fn kv_get(account: &str) -> Result<Option<String>> {
     match backend() {
         Backend::File => match std::fs::read_to_string(file_path(account)) {
             Ok(s) => Ok(Some(s)),
@@ -128,7 +128,7 @@ fn kv_get(account: &str) -> Result<Option<String>> {
 }
 
 /// Write a value by logical account name to the active backend.
-fn kv_set(account: &str, value: &str) -> Result<()> {
+pub(crate) fn kv_set(account: &str, value: &str) -> Result<()> {
     match backend() {
         Backend::File => {
             let dir = config_dir();
@@ -314,9 +314,14 @@ impl StoredToken {
     }
 }
 
-/// Persist client credentials.
-pub fn save_credentials(creds: &ClientCredentials) -> Result<()> {
-    kv_set(ACCT_CREDENTIALS, &serde_json::to_string_pretty(creds)?)
+pub fn save_credentials_for(
+    profile: &crate::profiles::Profile,
+    creds: &ClientCredentials,
+) -> Result<()> {
+    kv_set(
+        &profile.credential_key(),
+        &serde_json::to_string_pretty(creds)?,
+    )
 }
 
 /// Load client credentials, if present.
@@ -327,9 +332,17 @@ pub fn load_credentials() -> Result<Option<ClientCredentials>> {
     }
 }
 
-/// Persist an OAuth token.
-pub fn save_token(token: &StoredToken) -> Result<()> {
-    kv_set(ACCT_TOKEN, &serde_json::to_string_pretty(token)?)
+pub fn load_credentials_for(
+    profile: &crate::profiles::Profile,
+) -> Result<Option<ClientCredentials>> {
+    match kv_get(&profile.credential_key())? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn save_token_for(profile: &crate::profiles::Profile, token: &StoredToken) -> Result<()> {
+    kv_set(&profile.token_key(), &serde_json::to_string_pretty(token)?)
 }
 
 /// Load the stored OAuth token, if present.
@@ -340,14 +353,19 @@ pub fn load_token() -> Result<Option<StoredToken>> {
     }
 }
 
-/// Remove the stored token (used by `logout`). Missing entry is not an error.
-pub fn delete_token() -> Result<()> {
-    kv_delete(ACCT_TOKEN)
+pub fn load_token_for(profile: &crate::profiles::Profile) -> Result<Option<StoredToken>> {
+    match kv_get(&profile.token_key())? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
 }
 
-/// Remove stored client credentials (used by `logout --all`).
-pub fn delete_credentials() -> Result<()> {
-    kv_delete(ACCT_CREDENTIALS)
+pub fn delete_token_for(profile: &crate::profiles::Profile) -> Result<()> {
+    kv_delete(&profile.token_key())
+}
+
+pub fn delete_credentials_for(profile: &crate::profiles::Profile) -> Result<()> {
+    kv_delete(&profile.credential_key())
 }
 
 /// Returns the on-disk storage directory when the file backend is active, so

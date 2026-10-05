@@ -5,12 +5,21 @@ use chrono::{Local, TimeZone};
 
 use crate::cli::LoginArgs;
 use crate::format::OutputMode;
+use crate::profiles::{Profile, Registry};
 use crate::secrets::{self, ClientCredentials};
 use crate::{auth, terms};
 
-/// Resolve client credentials from flags → keychain → env/.env.
-fn resolve_credentials(args: &LoginArgs) -> anyhow::Result<ClientCredentials> {
-    // Highest priority: explicit flags (also fed by CLIENT_ID/SECRET env).
+/// Resolve explicit credentials, this profile's stored credentials, then env/.env bootstrap values.
+fn resolve_credentials(
+    args: &LoginArgs,
+    profile: Option<&Profile>,
+) -> anyhow::Result<ClientCredentials> {
+    match (&args.client_id, &args.client_secret) {
+        (Some(_), None) | (None, Some(_)) => {
+            anyhow::bail!("provide both --client-id and --client-secret")
+        }
+        _ => {}
+    }
     if let (Some(id), Some(secret)) = (&args.client_id, &args.client_secret) {
         return Ok(ClientCredentials {
             client_id: id.clone(),
@@ -21,14 +30,18 @@ fn resolve_credentials(args: &LoginArgs) -> anyhow::Result<ClientCredentials> {
                 .unwrap_or_else(secrets::default_redirect),
         });
     }
-    // Next: previously stored credentials.
-    if let Some(mut creds) = secrets::load_credentials()? {
+    // Existing profile credentials take precedence over global bootstrap env vars.
+    if let Some(mut creds) = profile
+        .map(secrets::load_credentials_for)
+        .transpose()?
+        .flatten()
+    {
         if let Some(r) = &args.redirect_uri {
             creds.redirect_uri = r.clone();
         }
         return Ok(creds);
     }
-    // Finally: environment / .env bootstrap.
+    // Finally: environment / .env bootstrap, used to configure a new profile.
     if let Some(mut creds) = secrets::credentials_from_env() {
         if let Some(r) = &args.redirect_uri {
             creds.redirect_uri = r.clone();
@@ -53,8 +66,23 @@ fn print_storage_overview() {
     eprintln!();
 }
 
-pub fn login(args: LoginArgs) -> anyhow::Result<()> {
-    let creds = resolve_credentials(&args)?;
+pub fn login(args: LoginArgs, selected: Option<&str>) -> anyhow::Result<()> {
+    let mut registry = Registry::load()?;
+    let name = selected
+        .map(str::to_owned)
+        .or_else(|| registry.default_profile.clone())
+        .unwrap_or_else(|| "default".to_owned());
+    crate::profiles::validate_name(&name)?;
+    let existing = registry.get_optional(&name);
+    let profile = existing.clone().unwrap_or_else(|| Profile {
+        name: name.clone(),
+        legacy: false,
+    });
+    if existing.is_none() && !confirm_new_profile(&name)? {
+        println!("Aborted.");
+        return Ok(());
+    }
+    let creds = resolve_credentials(&args, existing.as_ref())?;
 
     // Show all storage options up front so the choice is informed.
     print_storage_overview();
@@ -71,19 +99,23 @@ pub fn login(args: LoginArgs) -> anyhow::Result<()> {
         );
     }
 
-    // Persist credentials unless told not to. Per terms §4.1 they are
-    // confidential, kept in the chosen secret store, never committed.
-    if !args.no_save_credentials {
-        secrets::save_credentials(&creds).context("saving credentials")?;
-    }
-
     let token = auth::login(&creds).context("BankID login failed")?;
+    if !args.no_save_credentials {
+        secrets::save_credentials_for(&profile, &creds).context("saving credentials")?;
+    }
+    secrets::save_token_for(&profile, &token).context("saving token")?;
+    if existing.is_none() {
+        registry.add(profile)?;
+    }
     let expiry = Local
         .timestamp_opt(token.expires_at, 0)
         .single()
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default();
-    println!("✅ Logged in. Access token valid until {expiry}.");
+    println!(
+        "✅ Logged in to profile '{}'. Access token valid until {expiry}.",
+        name
+    );
     if !args.no_save_credentials {
         println!(
             "   Credentials stored via {}, you can delete .env now.",
@@ -93,51 +125,79 @@ pub fn login(args: LoginArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn logout(all: bool) -> anyhow::Result<()> {
-    secrets::delete_token()?;
+fn confirm_new_profile(name: &str) -> anyhow::Result<bool> {
+    use std::io::{self, Write};
+    print!("Create profile '{name}'? [y/N] ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+pub fn logout(all: bool, selected: Option<&str>) -> anyhow::Result<()> {
+    let registry = Registry::load()?;
+    let profile = registry.select(selected, true)?;
+    secrets::delete_token_for(&profile)?;
     if all {
-        secrets::delete_credentials()?;
-        println!("✅ Logged out and removed stored client credentials.");
+        secrets::delete_credentials_for(&profile)?;
+        println!(
+            "✅ Logged out profile '{}' and removed stored client credentials.",
+            profile.name
+        );
     } else {
         println!(
-            "✅ Logged out (token removed). Client credentials kept; use --all to remove them."
+            "✅ Logged out profile '{}' (token removed). Client credentials kept; use --all to remove them.", profile.name
         );
     }
     Ok(())
 }
 
-pub fn status(mode: OutputMode) -> anyhow::Result<()> {
-    let token = secrets::load_token()?;
-    let has_creds = secrets::load_credentials()?.is_some();
-
-    let (logged_in, valid, expires_at) = match &token {
-        Some(t) => (true, t.is_valid(), Some(t.expires_at)),
-        None => (false, false, None),
+pub fn status(mode: OutputMode, selected: Option<&str>) -> anyhow::Result<()> {
+    let registry = Registry::load()?;
+    let profiles = if let Some(name) = selected {
+        vec![registry.get(name)?]
+    } else {
+        registry.profiles.clone()
     };
-    let expiry_str = expires_at
-        .and_then(|e| Local.timestamp_opt(e, 0).single())
-        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
-
+    let statuses = profiles
+        .iter()
+        .map(|p| profile_status(p, &registry))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     if mode == OutputMode::Json {
         return crate::format::print_json(&serde_json::json!({
-            "loggedIn": logged_in,
-            "tokenValid": valid,
-            "expiresAt": expiry_str,
-            "hasStoredCredentials": has_creds,
+            "defaultProfile": registry.default_profile,
+            "profiles": statuses,
             "storageBackend": secrets::backend_name(),
-            "supportedBackends": secrets::backend_options()
-                .iter()
-                .map(|(name, _, _)| *name)
-                .collect::<Vec<_>>(),
+            "supportedBackends": secrets::backend_options().iter().map(|(name, _, _)| *name).collect::<Vec<_>>(),
         }));
     }
 
-    println!("Logged in:           {}", yesno(logged_in));
-    println!("Access token valid:  {}", yesno(valid));
-    if let Some(e) = expiry_str {
-        println!("Token expires:       {e}");
+    if statuses.is_empty() {
+        println!("No profiles configured. Run `sb1 login` first.");
     }
-    println!("Credentials stored:  {}", yesno(has_creds));
+    for status in &statuses {
+        println!(
+            "Profile:             {}{}",
+            status["name"].as_str().unwrap_or_default(),
+            if status["isDefault"] == true {
+                " (default)"
+            } else {
+                ""
+            }
+        );
+        println!("Logged in:           {}", yesno(status["loggedIn"] == true));
+        println!(
+            "Access token valid:  {}",
+            yesno(status["tokenValid"] == true)
+        );
+        if let Some(e) = status["expiresAt"].as_str() {
+            println!("Token expires:       {e}");
+        }
+        println!(
+            "Credentials stored:  {}\n",
+            yesno(status["hasStoredCredentials"] == true)
+        );
+    }
     println!("Storage backend:     {}", secrets::backend_name());
     println!("\nSecret storage options (set SB1_STORE):");
     for (name, desc, active) in secrets::backend_options() {
@@ -148,21 +208,47 @@ pub fn status(mode: OutputMode) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn hello() -> anyhow::Result<()> {
-    let client = crate::commands::authed_client()?;
+fn profile_status(profile: &Profile, registry: &Registry) -> anyhow::Result<serde_json::Value> {
+    let token = secrets::load_token_for(profile)?;
+    let has_creds = secrets::load_credentials_for(profile)?.is_some();
+    let expiry_str = token
+        .as_ref()
+        .and_then(|t| Local.timestamp_opt(t.expires_at, 0).single())
+        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string());
+    Ok(serde_json::json!({
+        "name": profile.name,
+        "isDefault": registry.default_profile.as_deref() == Some(&profile.name),
+        "loggedIn": token.is_some(),
+        "tokenValid": token.as_ref().is_some_and(|t| t.is_valid()),
+        "expiresAt": expiry_str,
+        "hasStoredCredentials": has_creds,
+        "legacyContext": profile.legacy,
+    }))
+}
+
+pub fn hello(selected: Option<&str>) -> anyhow::Result<()> {
+    let registry = Registry::load()?;
+    let profile = registry.select(selected, false)?;
+    let client = crate::commands::authed_client_for(&profile)?;
     let msg = client.hello().context("hello world request failed")?;
     println!("{msg}");
     Ok(())
 }
 
-pub fn refresh() -> anyhow::Result<()> {
-    let token = auth::force_refresh().context("token refresh failed")?;
+pub fn refresh(selected: Option<&str>) -> anyhow::Result<()> {
+    let registry = Registry::load()?;
+    let profile = registry.select(selected, true)?;
+    let token = auth::force_refresh(&profile)
+        .with_context(|| format!("token refresh failed for profile '{}'", profile.name))?;
     let expiry = Local
         .timestamp_opt(token.expires_at, 0)
         .single()
         .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_default();
-    println!("✅ Token refreshed. Valid until {expiry}.");
+    println!(
+        "✅ Token refreshed for profile '{}'. Valid until {expiry}.",
+        profile.name
+    );
     Ok(())
 }
 

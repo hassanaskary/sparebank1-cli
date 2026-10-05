@@ -18,14 +18,14 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::Context;
 
 use crate::client::TxnQuery;
-use crate::commands::authed_client;
 use crate::format::{self, OutputMode};
 use crate::models::{Account, Transaction};
+use crate::profiles::Profile;
 use crate::util::{self, format_kr};
 
-pub fn run(months: i64, mode: OutputMode, mask: bool) -> anyhow::Result<()> {
+pub fn run(months: i64, mode: OutputMode, mask: bool, profile: &Profile) -> anyhow::Result<()> {
     let months = months.max(1);
-    let client = authed_client()?;
+    let client = crate::commands::authed_client_for(profile)?;
 
     // All account types so net worth and transactions are complete.
     let opts = crate::client::AccountListOpts {

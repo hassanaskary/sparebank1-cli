@@ -8,7 +8,7 @@ pub mod transfer;
 
 use anyhow::{anyhow, Context};
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, ProfileAction};
 use crate::client::{AccountListOpts, ApiClient};
 use crate::format::OutputMode;
 use crate::models::Account;
@@ -23,8 +23,9 @@ pub fn output_mode(cli: &Cli) -> OutputMode {
 }
 
 /// Build an authenticated API client, refreshing the token if needed.
-pub fn authed_client() -> anyhow::Result<ApiClient> {
-    let token = crate::auth::valid_access_token().context("authentication required")?;
+pub fn authed_client_for(profile: &crate::profiles::Profile) -> anyhow::Result<ApiClient> {
+    let token = crate::auth::valid_access_token(profile)
+        .with_context(|| format!("authentication required for profile '{}'", profile.name))?;
     Ok(ApiClient::new(token)?)
 }
 
@@ -98,21 +99,43 @@ pub fn resolve_account_ref(accounts: &[Account], input: &str) -> anyhow::Result<
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     let mode = output_mode(&cli);
     let mask = cli.mask;
+    let selected = cli.profile.as_deref();
     match cli.command {
-        Command::Login(args) => auth::login(args),
-        Command::Logout { all } => auth::logout(all),
-        Command::Status => auth::status(mode),
-        Command::Hello => auth::hello(),
-        Command::Refresh => auth::refresh(),
-        Command::Accounts(args) => accounts::list(args, mode, mask),
-        Command::Account(args) => accounts::show(args, mode, mask),
-        Command::Balance { account_number } => accounts::balance(account_number),
-        Command::Transactions(args) => transactions::list(args, mode, mask),
-        Command::Transaction { id, classified } => transactions::show(id, classified),
-        Command::Export(args) => transactions::export(args),
-        Command::Transfer { kind } => transfer::run(kind, mode),
-        Command::Summary { months } => summary::run(months, mode, mask),
+        Command::Profile { action } => match action {
+            ProfileAction::SetDefault { name } => {
+                let mut registry = crate::profiles::Registry::load()?;
+                registry.set_default(&name)?;
+                println!("Default profile set to '{name}'.");
+                Ok(())
+            }
+        },
+        Command::Login(args) => auth::login(args, selected),
+        Command::Logout { all } => auth::logout(all, selected),
+        Command::Status => auth::status(mode, selected),
+        Command::Hello => auth::hello(selected),
+        Command::Refresh => auth::refresh(selected),
+        Command::Accounts(args) => accounts::list(args, mode, mask, &read_profile(selected)?),
+        Command::Account(args) => accounts::show(args, mode, mask, &read_profile(selected)?),
+        Command::Balance { account_number } => {
+            accounts::balance(account_number, &read_profile(selected)?)
+        }
+        Command::Transactions(args) => {
+            transactions::list(args, mode, mask, &read_profile(selected)?)
+        }
+        Command::Transaction { id, classified } => {
+            transactions::show(id, classified, &read_profile(selected)?)
+        }
+        Command::Export(args) => transactions::export(args, &read_profile(selected)?),
+        Command::Transfer { kind } => {
+            let profile = crate::profiles::Registry::load()?.select(selected, true)?;
+            transfer::run(kind, mode, &profile)
+        }
+        Command::Summary { months } => summary::run(months, mode, mask, &read_profile(selected)?),
     }
+}
+
+fn read_profile(selected: Option<&str>) -> anyhow::Result<crate::profiles::Profile> {
+    crate::profiles::Registry::load()?.select(selected, false)
 }
 
 #[cfg(test)]
