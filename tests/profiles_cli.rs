@@ -2,23 +2,48 @@ use std::io::{BufRead, BufReader};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+static NEXT_SANDBOX_ID: AtomicU64 = AtomicU64::new(0);
+static CALLBACK_PORT_SETUP: Mutex<()> = Mutex::new(());
+
 struct Sandbox(PathBuf);
 
+struct PendingLogin {
+    child: Child,
+    callback_port: u16,
+    state: String,
+    request: thread::JoinHandle<String>,
+    stderr_reader: thread::JoinHandle<String>,
+}
+
 impl Sandbox {
+    fn at(path: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir(&path)?;
+        std::fs::create_dir(path.join("sparebank1-cli"))?;
+        Ok(Self(path))
+    }
+
     fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("sb1-profiles-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(path.join("sparebank1-cli")).unwrap();
-        Self(path)
+        loop {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let id = NEXT_SANDBOX_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("sb1-profiles-{}-{nonce}-{id}", std::process::id()));
+            match Self::at(path) {
+                Ok(sandbox) => return sandbox,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("creating test sandbox: {error}"),
+            }
+        }
     }
 
     fn store(&self) -> PathBuf {
@@ -64,12 +89,28 @@ impl Sandbox {
     }
 }
 
+#[test]
+fn sandbox_creation_refuses_to_reuse_an_existing_directory() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "sb1-profiles-collision-{}-{nonce}",
+        std::process::id()
+    ));
+    let first = Sandbox::at(path.clone()).unwrap();
+    let second = Sandbox::at(path);
+    assert!(matches!(second, Err(ref error) if error.kind() == std::io::ErrorKind::AlreadyExists));
+    drop(first);
+}
+
 fn fake_bank_once(reply: &'static str) -> (String, thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let handle = thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let mut stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
@@ -82,7 +123,7 @@ fn fake_bank_once(reply: &'static str) -> (String, thread::JoinHandle<String>) {
             }
         };
         stream
-            .set_read_timeout(Some(Duration::from_secs(3)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .unwrap();
         let mut request = Vec::new();
         let mut buf = [0; 4096];
@@ -123,7 +164,7 @@ fn fake_bank_sequence(
     let handle = thread::spawn(move || {
         let mut requests = Vec::new();
         for reply in replies {
-            let deadline = Instant::now() + Duration::from_secs(3);
+            let deadline = Instant::now() + Duration::from_secs(15);
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -137,7 +178,7 @@ fn fake_bank_sequence(
                 }
             };
             stream
-                .set_read_timeout(Some(Duration::from_secs(3)))
+                .set_read_timeout(Some(Duration::from_secs(15)))
                 .unwrap();
             let mut request = Vec::new();
             let mut buf = [0; 4096];
@@ -178,7 +219,26 @@ fn login_new_profile(
     client_id: &str,
     client_secret: &str,
 ) -> Output {
-    let (output, request) = perform_login(
+    let (output, request) = finish_login(start_profile_login(
+        sandbox,
+        name,
+        client_id,
+        client_secret,
+        r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600}"#,
+    ));
+    assert!(request.contains(client_id));
+    assert!(request.contains(client_secret));
+    output
+}
+
+fn start_profile_login(
+    sandbox: &Sandbox,
+    name: &str,
+    client_id: &str,
+    client_secret: &str,
+    token_reply: &'static str,
+) -> PendingLogin {
+    begin_login(
         sandbox,
         vec![
             "login".to_owned(),
@@ -190,20 +250,30 @@ fn login_new_profile(
             client_secret.to_owned(),
         ],
         Some(b"yes\n"),
-    );
-    assert!(request.contains(client_id));
-    assert!(request.contains(client_secret));
-    output
+        token_reply,
+    )
 }
 
-fn perform_login(
+fn perform_login(sandbox: &Sandbox, args: Vec<String>, answer: Option<&[u8]>) -> (Output, String) {
+    finish_login(begin_login(
+        sandbox,
+        args,
+        answer,
+        r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600}"#,
+    ))
+}
+
+fn begin_login(
     sandbox: &Sandbox,
     mut args: Vec<String>,
     answer: Option<&[u8]>,
-) -> (Output, String) {
-    let (url, request) = fake_bank_once(
-        r#"{"access_token":"new-access","refresh_token":"new-refresh","token_type":"Bearer","expires_in":3600}"#,
-    );
+    token_reply: &'static str,
+) -> PendingLogin {
+    // Keep other login tests from selecting the same ephemeral callback port
+    // while this child starts and binds its listener. The lock is released as
+    // soon as the child prints its authorize URL, which follows the bind.
+    let callback_port_setup = CALLBACK_PORT_SETUP.lock().unwrap();
+    let (url, request) = fake_bank_once(token_reply);
     let reserved = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = reserved.local_addr().unwrap().port();
     drop(reserved);
@@ -213,7 +283,7 @@ fn perform_login(
     let mut child = sandbox
         .command(&args)
         .env("SB1_TEST_API_BASE_URL", url)
-        .env("BROWSER", "/bin/true")
+        .env("SB1_TEST_NO_BROWSER", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -225,33 +295,68 @@ fn perform_login(
         drop(child.stdin.take());
     }
     let mut stderr = BufReader::new(child.stderr.take().unwrap());
-    let mut captured = String::new();
-    let authorize_url = loop {
-        let mut line = String::new();
-        let n = stderr.read_line(&mut line).unwrap();
-        if n == 0 {
-            panic!("login exited before showing authorization URL: {captured}");
+    let (url_tx, url_rx) = std::sync::mpsc::channel();
+    let stderr_reader = thread::spawn(move || {
+        let mut captured = String::new();
+        loop {
+            let mut line = String::new();
+            match stderr.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if (line.trim().starts_with("http://") || line.trim().starts_with("https://"))
+                        && url_tx.send(line.trim().to_owned()).is_err()
+                    {
+                        break;
+                    }
+                    captured.push_str(&line);
+                }
+            }
         }
-        captured.push_str(&line);
-        if line.trim().starts_with("http://") || line.trim().starts_with("https://") {
-            break line.trim().to_owned();
-        }
-    };
+        captured
+    });
+    let authorize_url = url_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| panic!("login exited before showing authorization URL"));
     let authorize = url::Url::parse(&authorize_url).unwrap();
+    assert_eq!(authorize.path(), "/oauth/authorize");
     let state = authorize
         .query_pairs()
         .find(|(k, _)| k == "state")
         .unwrap()
         .1
         .into_owned();
-    let mut callback = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(callback, "GET /callback?code=fake-code&state={state} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    drop(callback_port_setup);
+    PendingLogin {
+        child,
+        callback_port: port,
+        state,
+        request,
+        stderr_reader,
+    }
+}
+
+fn finish_login(login: PendingLogin) -> (Output, String) {
+    let mut callback = std::net::TcpStream::connect(("127.0.0.1", login.callback_port)).unwrap();
+    write!(callback, "GET /callback?code=fake-code&state={} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", login.state).unwrap();
     let mut callback_response = Vec::new();
-    callback.read_to_end(&mut callback_response).unwrap();
-    let output = child.wait_with_output().unwrap();
-    let token_request = request.join().unwrap();
-    let mut combined_stderr = captured;
+    let read_result = callback.read_to_end(&mut callback_response);
+    assert!(
+        read_result.is_ok()
+            || read_result.unwrap_err().kind() == std::io::ErrorKind::ConnectionReset
+    );
+    assert!(callback_response.starts_with(b"HTTP/1.1 200 OK"));
+    let output = login.child.wait_with_output().unwrap();
+    let mut combined_stderr = login.stderr_reader.join().unwrap();
     combined_stderr.push_str(&String::from_utf8_lossy(&output.stderr));
+    let token_request = login.request.join().unwrap_or_else(|_| {
+        panic!(
+            "fake bank received no token request; exit status: {}; stdout: {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            combined_stderr
+        )
+    });
+    assert!(token_request.starts_with("POST /oauth/token "));
     (
         Output {
             stderr: combined_stderr.into_bytes(),
@@ -543,6 +648,92 @@ fn login_adds_a_profile_and_reauthentication_keeps_it_as_one_profile() {
     assert!(request.contains("charlie-new-id"));
     assert!(request.contains("charlie-new-secret"));
     assert!(!request.contains("alice-secret"));
+}
+
+#[test]
+fn login_preserves_a_default_changed_during_bankid_authentication() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let pending = start_profile_login(
+        &sandbox,
+        "charlie",
+        "charlie-id",
+        "charlie-secret",
+        r#"{"access_token":"charlie-access","refresh_token":"charlie-refresh","expires_in":3600}"#,
+    );
+
+    let changed = sandbox.run(&["profile", "set-default", "bob"]);
+    assert!(changed.status.success());
+
+    let (login, _) = finish_login(pending);
+    assert!(
+        login.status.success(),
+        "{}",
+        String::from_utf8_lossy(&login.stderr)
+    );
+    let status = sandbox.run(&["--json", "status"]);
+    let body: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(body["defaultProfile"], "bob");
+    assert_eq!(body["profiles"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn overlapping_profile_logins_do_not_overwrite_the_first_profiles_secrets() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let first = start_profile_login(
+        &sandbox,
+        "charlie",
+        "first-id",
+        "first-secret",
+        r#"{"access_token":"first-access","refresh_token":"first-refresh","expires_in":3600}"#,
+    );
+    let second = start_profile_login(
+        &sandbox,
+        "charlie",
+        "second-id",
+        "second-secret",
+        r#"{"access_token":"second-access","refresh_token":"second-refresh","expires_in":3600}"#,
+    );
+
+    let (first, _) = finish_login(first);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let (second, _) = finish_login(second);
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("profile 'charlie' already exists"),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let credentials: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            sandbox
+                .store()
+                .join("profile-636861726c6965-client-credentials.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(credentials["client_id"], "first-id");
+    assert_eq!(credentials["client_secret"], "first-secret");
+    let token: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            sandbox
+                .store()
+                .join("profile-636861726c6965-oauth-token.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(token["access_token"], "first-access");
+    let status = sandbox.run(&["--json", "status"]);
+    let body: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(body["profiles"].as_array().unwrap().len(), 3);
 }
 
 #[test]

@@ -46,6 +46,21 @@ pub struct Registry {
 
 impl Registry {
     pub fn load() -> Result<Self> {
+        let _lock = secrets::lock_profiles()?;
+        Self::load_locked()
+    }
+
+    /// Apply a registry mutation against the latest persisted snapshot.
+    /// The lock remains held through the read-modify-write sequence.
+    pub fn update<T>(mutate: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let _lock = secrets::lock_profiles()?;
+        let mut registry = Self::load_locked()?;
+        let result = mutate(&mut registry)?;
+        registry.save()?;
+        Ok(result)
+    }
+
+    fn load_locked() -> Result<Self> {
         if let Some(json) = secrets::kv_get(REGISTRY_KEY)? {
             return Ok(serde_json::from_str(&json)?);
         }
@@ -109,7 +124,7 @@ impl Registry {
     pub fn set_default(&mut self, name: &str) -> Result<()> {
         self.get(name)?;
         self.default_profile = Some(name.to_owned());
-        self.save()
+        Ok(())
     }
 
     pub fn get_optional(&self, name: &str) -> Option<Profile> {
@@ -125,7 +140,7 @@ impl Registry {
         if self.default_profile.is_none() {
             self.default_profile = self.profiles.last().map(|p| p.name.clone());
         }
-        self.save()
+        Ok(())
     }
 }
 

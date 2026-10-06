@@ -103,8 +103,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Profile { action } => match action {
             ProfileAction::SetDefault { name } => {
-                let mut registry = crate::profiles::Registry::load()?;
-                registry.set_default(&name)?;
+                crate::profiles::Registry::update(|registry| registry.set_default(&name))?;
                 if mode == OutputMode::Json {
                     crate::format::print_json(&serde_json::json!({
                         "defaultProfile": name,

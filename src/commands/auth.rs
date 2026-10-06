@@ -67,7 +67,7 @@ fn print_storage_overview() {
 }
 
 pub fn login(args: LoginArgs, selected: Option<&str>) -> anyhow::Result<()> {
-    let mut registry = Registry::load()?;
+    let registry = Registry::load()?;
     let name = selected
         .map(str::to_owned)
         .or_else(|| registry.default_profile.clone())
@@ -100,12 +100,22 @@ pub fn login(args: LoginArgs, selected: Option<&str>) -> anyhow::Result<()> {
     }
 
     let token = auth::login(&creds).context("BankID login failed")?;
-    if !args.no_save_credentials {
-        secrets::save_credentials_for(&profile, &creds).context("saving credentials")?;
-    }
-    secrets::save_token_for(&profile, &token).context("saving token")?;
     if existing.is_none() {
-        registry.add(profile)?;
+        Registry::update(|latest| {
+            if latest.get_optional(&name).is_some() {
+                anyhow::bail!("profile '{name}' already exists");
+            }
+            if !args.no_save_credentials {
+                secrets::save_credentials_for(&profile, &creds).context("saving credentials")?;
+            }
+            secrets::save_token_for(&profile, &token).context("saving token")?;
+            latest.add(profile.clone())
+        })?;
+    } else {
+        if !args.no_save_credentials {
+            secrets::save_credentials_for(&profile, &creds).context("saving credentials")?;
+        }
+        secrets::save_token_for(&profile, &token).context("saving token")?;
     }
     let expiry = Local
         .timestamp_opt(token.expires_at, 0)

@@ -147,6 +147,32 @@ pub(crate) fn kv_set(account: &str, value: &str) -> Result<()> {
     }
 }
 
+/// Serialize profile-registry reads that may initialize state and all registry
+/// mutations across concurrent `sb1` processes.
+pub(crate) fn lock_profiles() -> Result<std::fs::File> {
+    use std::fs::OpenOptions;
+
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        crate::error::Sb1Error::AuthFlow(format!("creating {}: {e}", dir.display()))
+    })?;
+    let path = dir.join(".profiles.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| {
+            crate::error::Sb1Error::AuthFlow(format!("opening {}: {e}", path.display()))
+        })?;
+    set_owner_only(&path)?;
+    fs2::FileExt::lock_exclusive(&lock).map_err(|e| {
+        crate::error::Sb1Error::AuthFlow(format!("locking {}: {e}", path.display()))
+    })?;
+    Ok(lock)
+}
+
 /// Delete a stored value; a missing entry is not an error.
 fn kv_delete(account: &str) -> Result<()> {
     match backend() {

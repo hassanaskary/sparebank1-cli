@@ -95,7 +95,7 @@ pub fn login(creds: &ClientCredentials) -> Result<StoredToken> {
 
     eprintln!("Opening your browser for BankID login…");
     eprintln!("If it doesn't open, visit:\n  {authorize}\n");
-    let _ = webbrowser::open(authorize.as_str());
+    open_authorize_page(authorize.as_str());
 
     let (code, returned_state) = wait_for_callback(&listener, &path)?;
     if returned_state.as_deref() != Some(state.as_str()) {
@@ -107,6 +107,14 @@ pub fn login(creds: &ClientCredentials) -> Result<StoredToken> {
 
     let token = exchange_code(creds, &code)?;
     Ok(token)
+}
+
+fn open_authorize_page(url: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SB1_TEST_NO_BROWSER").is_some() {
+        return;
+    }
+    let _ = webbrowser::open(url);
 }
 
 /// Return a valid access token, refreshing or erroring as needed.
@@ -238,9 +246,21 @@ fn wait_for_callback(
         };
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
+        let mut request = Vec::new();
         let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        let request = String::from_utf8_lossy(&buf[..n]);
+        loop {
+            let n = stream
+                .read(&mut buf)
+                .map_err(|e| Sb1Error::AuthFlow(format!("reading OAuth callback: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
         let request_line = request.lines().next().unwrap_or("");
         // "GET /callback?code=...&state=... HTTP/1.1"
         let target = request_line.split_whitespace().nth(1).unwrap_or("");
