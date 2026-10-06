@@ -390,6 +390,21 @@ fn status_can_select_one_profile_and_set_default_changes_implicit_selection() {
 }
 
 #[test]
+fn set_default_outputs_json_when_json_is_requested() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+
+    let changed = sandbox.run(&["--json", "profile", "set-default", "bob"]);
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_eq!(body, serde_json::json!({"defaultProfile": "bob"}));
+}
+
+#[test]
 fn logout_requires_selection_with_multiple_profiles_and_only_clears_selected_profile() {
     let sandbox = Sandbox::new();
     sandbox.configured_pair();

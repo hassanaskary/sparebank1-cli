@@ -105,8 +105,14 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             ProfileAction::SetDefault { name } => {
                 let mut registry = crate::profiles::Registry::load()?;
                 registry.set_default(&name)?;
-                println!("Default profile set to '{name}'.");
-                Ok(())
+                if mode == OutputMode::Json {
+                    crate::format::print_json(&serde_json::json!({
+                        "defaultProfile": name,
+                    }))
+                } else {
+                    println!("Default profile set to '{name}'.");
+                    Ok(())
+                }
             }
         },
         Command::Login(args) => auth::login(args, selected),
