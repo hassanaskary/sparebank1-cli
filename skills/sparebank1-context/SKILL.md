@@ -45,7 +45,7 @@ legacy_context="<legacyContext value from sb1 status --json>"
 if [ "$legacy_context" = true ]; then
   default_ctx="$HOME/.config/sparebank1-cli/context.md"
 else
-  profile_hex="$(printf '%s' "$profile" | od -An -tx1 | tr -d ' \n')"
+  profile_hex="$(printf '%s' "$profile" | od -An -v -tx1 | tr -d ' \n')"
   default_ctx="$HOME/.config/sparebank1-cli/contexts/$profile_hex/context.md"
 fi
 ctx="${SB1_CONTEXT_FILE:-$default_ctx}"
