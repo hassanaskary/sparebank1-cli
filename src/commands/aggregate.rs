@@ -91,11 +91,29 @@ impl ClientCollection {
             };
             match operation(client) {
                 Ok(value) => return (Some((profile.clone(), value)), failures),
-                Err(error) => failures.push((profile.clone(), format!("{error:#}"))),
+                Err(error) => {
+                    let should_try_another_profile = may_try_another_profile(&error);
+                    failures.push((profile.clone(), format!("{error:#}")));
+                    if !should_try_another_profile {
+                        break;
+                    }
+                }
             }
         }
         (None, failures)
     }
+}
+
+/// Only switch profiles when the API says this profile cannot access the
+/// resource. Rate limits, server errors, and transport failures must not fan out.
+fn may_try_another_profile(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<crate::error::Sb1Error>(),
+        Some(crate::error::Sb1Error::Api {
+            status: 403 | 404,
+            ..
+        })
+    )
 }
 
 /// Resolve the requested profile set and authenticate independently per profile.
