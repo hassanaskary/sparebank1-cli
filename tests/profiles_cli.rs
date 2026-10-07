@@ -220,7 +220,12 @@ fn fake_bank_status_sequence(
                 500 => "Internal Server Error",
                 _ => "Error",
             };
-            let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
+            let retry_after = if *status == 429 {
+                "Retry-After: 7\r\n"
+            } else {
+                ""
+            };
+            let response = format!("HTTP/1.1 {status} {reason}\r\n{retry_after}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len());
             stream.write_all(response.as_bytes()).unwrap();
             requests.push(String::from_utf8(request).unwrap());
         }
@@ -720,6 +725,28 @@ fn accounts_all_profiles_marks_partial_failure_and_returns_available_data() {
 }
 
 #[test]
+fn accounts_all_profiles_stops_listing_profiles_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let responses: &'static [(u16, &'static str)] =
+        Box::leak(vec![(429, r#"{"error":"rate limited"}"#)].into_boxed_slice());
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "accounts"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["profile"], "alice");
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(requests.join().unwrap().len(), 1);
+}
+
+#[test]
 fn accounts_all_profiles_marks_profile_without_token_incomplete() {
     let sandbox = Sandbox::new();
     sandbox.configured_pair();
@@ -873,6 +900,35 @@ fn transactions_all_profiles_stops_fallback_after_rate_limit() {
 }
 
 #[test]
+fn transactions_all_profiles_stops_processing_accounts_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let accounts =
+        r#"{"accounts":[{"key":"A","name":"Account A"},{"key":"B","name":"Account B"}]}"#;
+    let responses: &'static [(u16, &'static str)] = Box::leak(
+        vec![
+            (200, accounts),
+            (200, accounts),
+            (429, r#"{"error":"rate limited"}"#),
+        ]
+        .into_boxed_slice(),
+    );
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "transactions"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(requests.join().unwrap().len(), 3);
+}
+
+#[test]
 fn hello_all_profiles_reports_each_profile_result() {
     let sandbox = Sandbox::new();
     sandbox.configured_pair();
@@ -892,6 +948,28 @@ fn hello_all_profiles_reports_each_profile_result() {
     assert_eq!(body["results"][0]["message"], "hello alice");
     assert_eq!(body["results"][1]["profile"], "bob");
     assert_eq!(requests.join().unwrap().len(), 2);
+}
+
+#[test]
+fn hello_all_profiles_stops_checking_profiles_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let responses: &'static [(u16, &'static str)] =
+        Box::leak(vec![(429, r#"{"error":"rate limited"}"#)].into_boxed_slice());
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "hello"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["profile"], "alice");
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(requests.join().unwrap().len(), 1);
 }
 
 #[test]
@@ -995,6 +1073,29 @@ fn balance_all_profiles_falls_back_to_another_profile_for_a_shared_account() {
 }
 
 #[test]
+fn balance_all_profiles_skips_balance_request_after_profile_list_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let accounts = r#"{"accounts":[{"key":"SHARED-KEY","name":"Shared account","accountNumber":"11112222333"}]}"#;
+    let responses: &'static [(u16, &'static str)] =
+        Box::leak(vec![(200, accounts), (429, r#"{"error":"rate limited"}"#)].into_boxed_slice());
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "balance", "11112222333"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["balance"], serde_json::Value::Null);
+    assert_eq!(body["queriedBy"], serde_json::Value::Null);
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(requests.join().unwrap().len(), 2);
+}
+
+#[test]
 fn transaction_details_all_profiles_groups_identical_matches_by_profile() {
     let sandbox = Sandbox::new();
     sandbox.configured_pair();
@@ -1014,6 +1115,28 @@ fn transaction_details_all_profiles_groups_identical_matches_by_profile() {
         serde_json::json!(["alice", "bob"])
     );
     assert_eq!(requests.join().unwrap().len(), 2);
+}
+
+#[test]
+fn transaction_details_all_profiles_stops_searching_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let responses: &'static [(u16, &'static str)] =
+        Box::leak(vec![(429, r#"{"error":"rate limited"}"#)].into_boxed_slice());
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "transaction", "txn-1"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["matches"].as_array().unwrap().len(), 0);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(requests.join().unwrap().len(), 1);
 }
 
 #[test]
@@ -1197,6 +1320,65 @@ fn summary_all_profiles_does_not_retry_or_fallback_after_rate_limit() {
         .as_str()
         .unwrap()
         .contains("rate limited"));
+    assert_eq!(requests.join().unwrap().len(), 3);
+}
+
+#[test]
+fn summary_all_profiles_stops_after_rate_limit_on_plain_fallback() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let accounts = r#"{"accounts":[{"key":"A","name":"Account A","accountNumber":"11112222333","balance":100},{"key":"B","name":"Account B","accountNumber":"22223333444","balance":200}]}"#;
+    let responses: &'static [(u16, &'static str)] = Box::leak(
+        vec![
+            (200, accounts),
+            (200, accounts),
+            (404, r#"{"error":"classified unavailable"}"#),
+            (429, r#"{"error":"rate limited"}"#),
+        ]
+        .into_boxed_slice(),
+    );
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "summary", "--months", "1"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(body["netWorth"]["NOK"], 300.0);
+    assert_eq!(requests.join().unwrap().len(), 4);
+}
+
+#[test]
+fn summary_all_profiles_stops_processing_accounts_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let accounts = r#"{"accounts":[{"key":"A","name":"Account A","accountNumber":"11112222333","balance":100},{"key":"B","name":"Account B","accountNumber":"22223333444","balance":200}]}"#;
+    let responses: &'static [(u16, &'static str)] = Box::leak(
+        vec![
+            (200, accounts),
+            (200, accounts),
+            (429, r#"{"error":"rate limited"}"#),
+        ]
+        .into_boxed_slice(),
+    );
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "summary", "--months", "1"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["retryAfterSeconds"], 7);
+    assert_eq!(body["netWorth"]["NOK"], 300.0);
     assert_eq!(requests.join().unwrap().len(), 3);
 }
 

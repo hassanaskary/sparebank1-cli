@@ -118,17 +118,24 @@ pub fn show(
     };
     let account_key = aggregate::account_key(&entry)?;
     if args.roles {
-        let (result, failures) = clients.first_success(&entry.profiles, |client| {
+        let result = clients.first_success(&entry.profiles, |client| {
             client
                 .client
                 .account_roles(account_key)
                 .map_err(anyhow::Error::from)
         });
-        for (profile, error) in failures {
-            clients.add_failure(&profile, error);
-        }
         let Some((queried_by, roles)) = result else {
             clients.report_failures();
+            if clients.is_rate_limited() {
+                return format::print_json(&serde_json::json!({
+                    "complete": false,
+                    "errors": clients.failures_json(),
+                    "profiles": entry.profiles,
+                    "queriedBy": null,
+                    "account": account_json(&entry.account),
+                    "roles": null,
+                }));
+            }
             anyhow::bail!("could not fetch account roles from any profile");
         };
         clients.report_failures();
@@ -142,17 +149,24 @@ pub fn show(
         }));
     }
     if args.details {
-        let (result, failures) = clients.first_success(&entry.profiles, |client| {
+        let result = clients.first_success(&entry.profiles, |client| {
             client
                 .client
                 .account_details(account_key)
                 .map_err(anyhow::Error::from)
         });
-        for (profile, error) in failures {
-            clients.add_failure(&profile, error);
-        }
         let Some((queried_by, details)) = result else {
             clients.report_failures();
+            if clients.is_rate_limited() {
+                return format::print_json(&serde_json::json!({
+                    "complete": false,
+                    "errors": clients.failures_json(),
+                    "profiles": entry.profiles,
+                    "queriedBy": null,
+                    "account": account_json(&entry.account),
+                    "details": null,
+                }));
+            }
             anyhow::bail!("could not fetch account details from any profile");
         };
         clients.report_failures();
@@ -166,15 +180,12 @@ pub fn show(
         }));
     }
 
-    let (result, failures) = clients.first_success(&entry.profiles, |client| {
+    let result = clients.first_success(&entry.profiles, |client| {
         client
             .client
             .account(account_key)
             .map_err(anyhow::Error::from)
     });
-    for (profile, error) in failures {
-        clients.add_failure(&profile, error);
-    }
     let (queried_by, account) = result
         .map(|(profile, account)| (Some(profile), account))
         .unwrap_or((None, entry.account.clone()));
@@ -227,12 +238,9 @@ pub fn balance(
             return Err(error);
         }
     };
-    let (result, failures) = clients.first_success(&entry.profiles, |client| {
+    let result = clients.first_success(&entry.profiles, |client| {
         client.client.balance(&digits).map_err(anyhow::Error::from)
     });
-    for (profile, error) in failures {
-        clients.add_failure(&profile, error);
-    }
     let (queried_by, balance) = result
         .map(|(profile, balance)| (Some(profile), balance))
         .unwrap_or((None, serde_json::Value::Null));

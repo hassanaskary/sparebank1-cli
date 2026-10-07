@@ -138,6 +138,9 @@ fn list_aggregate(args: TxnArgs, mode: OutputMode, mask: bool) -> anyhow::Result
     let mut rows = Vec::new();
     let mut request_failures = Vec::new();
     for entry in selected_entries {
+        if clients.is_rate_limited() {
+            break;
+        }
         let account_key = match crate::commands::aggregate::account_key(&entry) {
             Ok(key) => key.to_owned(),
             Err(error) => {
@@ -154,13 +157,12 @@ fn list_aggregate(args: TxnArgs, mode: OutputMode, mask: bool) -> anyhow::Result
             source: args.source.clone(),
             classified: args.classified,
         };
-        let (result, failures) = clients.first_success(&entry.profiles, |profile_client| {
+        let result = clients.first_success(&entry.profiles, |profile_client| {
             profile_client
                 .client
                 .transactions(&query)
                 .map_err(anyhow::Error::from)
         });
-        request_failures.extend(failures);
         if let Some((source, response)) = result {
             for error in response.errors {
                 request_failures.push((source.clone(), error));
@@ -236,7 +238,11 @@ pub fn show(
         let mut matches = Vec::new();
         let mut failures = Vec::new();
         let mut not_found = Vec::new();
+        let mut rate_limited = false;
         for entry in &clients.clients {
+            if clients.is_rate_limited() || rate_limited {
+                break;
+            }
             match entry.client.transaction_details(&id, classified) {
                 Ok(details) => {
                     if let Some(existing) = matches
@@ -255,11 +261,14 @@ pub fn show(
                     }
                 }
                 Err(error) if is_not_found(&error) => not_found.push(entry.profile.name.clone()),
-                Err(error) => failures.push((entry.profile.name.clone(), error.to_string())),
+                Err(error) => {
+                    rate_limited = matches!(error, crate::error::Sb1Error::RateLimited { .. });
+                    failures.push((entry.profile.name.clone(), anyhow::Error::from(error)));
+                }
             }
         }
         for (profile, error) in failures {
-            clients.add_failure(&profile, error);
+            clients.add_api_error(&profile, error);
         }
         if matches.is_empty() && clients.failures.is_empty() {
             anyhow::bail!("transaction '{id}' was not found in any configured profile");
@@ -299,15 +308,12 @@ pub fn export(args: ExportArgs, selected: Option<&str>, all_profiles: bool) -> a
             }
         };
         let account_key = crate::commands::aggregate::account_key(&entry)?.to_owned();
-        let (result, failures) = clients.first_success(&entry.profiles, |client| {
+        let result = clients.first_success(&entry.profiles, |client| {
             client
                 .client
                 .transactions_export(&account_key, &from, &to, args.fields.as_deref())
                 .map_err(anyhow::Error::from)
         });
-        for (profile, error) in failures {
-            clients.add_failure(&profile, error);
-        }
         let Some((source, bank_csv)) = result else {
             clients.report_failures();
             anyhow::bail!("aggregate export failed; see the profile errors above");

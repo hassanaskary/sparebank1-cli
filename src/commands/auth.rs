@@ -250,16 +250,25 @@ pub fn hello(selected: Option<&str>, all_profiles: bool, mode: OutputMode) -> an
     let mut results = Vec::new();
     let mut failures = Vec::new();
     for entry in &clients.clients {
+        if clients.is_rate_limited() {
+            break;
+        }
         match entry.client.hello() {
             Ok(message) => results.push(serde_json::json!({
                 "profile": entry.profile.name,
                 "message": message,
             })),
-            Err(error) => failures.push((entry.profile.name.clone(), error.to_string())),
+            Err(error) => {
+                let rate_limited = matches!(error, crate::error::Sb1Error::RateLimited { .. });
+                failures.push((entry.profile.name.clone(), anyhow::Error::from(error)));
+                if rate_limited {
+                    break;
+                }
+            }
         }
     }
     for (profile, error) in failures {
-        clients.add_failure(&profile, error);
+        clients.add_api_error(&profile, error);
     }
     clients.report_failures();
     if mode == OutputMode::Json {
