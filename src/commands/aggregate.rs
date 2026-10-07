@@ -20,6 +20,8 @@ pub struct ProfileClient {
 pub struct ProfileFailure {
     pub profile: String,
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
 }
 
 pub struct ClientCollection {
@@ -28,10 +30,10 @@ pub struct ClientCollection {
     pub clients: Vec<ProfileClient>,
     pub failures: Vec<ProfileFailure>,
     pub aggregated: bool,
+    rate_limited: bool,
 }
 
-pub type ProfileFailures = Vec<(String, String)>;
-pub type ProfileAttempt<T> = (Option<(String, T)>, ProfileFailures);
+pub type ProfileAttempt<T> = Option<(String, T)>;
 
 impl ClientCollection {
     pub fn complete(&self) -> bool {
@@ -55,20 +57,41 @@ impl ClientCollection {
         self.failures.push(ProfileFailure {
             profile: profile.to_owned(),
             error: error.to_string(),
+            retry_after_seconds: None,
         });
     }
 
+    pub fn is_rate_limited(&self) -> bool {
+        self.rate_limited
+    }
+
+    pub fn add_api_error(&mut self, profile: &str, error: anyhow::Error) {
+        if is_rate_limited(&error) {
+            self.rate_limited = true;
+        }
+        self.failures.push(profile_failure(profile, &error));
+    }
+
     pub fn fetch_accounts(&mut self, opts: &AccountListOpts) -> Vec<AccountEntry> {
+        if self.rate_limited {
+            return Vec::new();
+        }
         let mut lists = Vec::new();
         let mut failures = Vec::new();
         for entry in &self.clients {
             match entry.client.accounts(opts) {
                 Ok(accounts) => lists.push((entry.profile.name.clone(), accounts)),
-                Err(error) => failures.push((entry.profile.name.clone(), error.to_string())),
+                Err(error) => {
+                    let rate_limited = matches!(error, crate::error::Sb1Error::RateLimited { .. });
+                    failures.push((entry.profile.name.clone(), anyhow::Error::from(error)));
+                    if rate_limited {
+                        break;
+                    }
+                }
             }
         }
         for (profile, error) in failures {
-            self.add_failure(&profile, error);
+            self.add_api_error(&profile, error);
         }
         merge_accounts(lists)
     }
@@ -76,12 +99,14 @@ impl ClientCollection {
     /// Try profiles known to have access to one account until a request succeeds.
     /// Failed attempts are returned so callers can mark the aggregate incomplete.
     pub fn first_success<T>(
-        &self,
+        &mut self,
         profiles: &[String],
         mut operation: impl FnMut(&ProfileClient) -> Result<T>,
     ) -> ProfileAttempt<T> {
-        let mut failures = Vec::new();
         for profile in profiles {
+            if self.rate_limited {
+                break;
+            }
             let Some(client) = self
                 .clients
                 .iter()
@@ -90,17 +115,22 @@ impl ClientCollection {
                 continue;
             };
             match operation(client) {
-                Ok(value) => return (Some((profile.clone(), value)), failures),
+                Ok(value) => return Some((profile.clone(), value)),
                 Err(error) => {
                     let should_try_another_profile = may_try_another_profile(&error);
-                    failures.push((profile.clone(), format!("{error:#}")));
+                    let rate_limited = is_rate_limited(&error);
+                    self.failures.push(profile_failure(profile, &error));
+                    if rate_limited {
+                        self.rate_limited = true;
+                        break;
+                    }
                     if !should_try_another_profile {
                         break;
                     }
                 }
             }
         }
-        (None, failures)
+        None
     }
 }
 
@@ -116,6 +146,25 @@ fn may_try_another_profile(error: &anyhow::Error) -> bool {
     )
 }
 
+fn is_rate_limited(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<crate::error::Sb1Error>(),
+        Some(crate::error::Sb1Error::RateLimited { .. })
+    )
+}
+
+fn profile_failure(profile: &str, error: &anyhow::Error) -> ProfileFailure {
+    let retry_after_seconds = match error.downcast_ref::<crate::error::Sb1Error>() {
+        Some(crate::error::Sb1Error::RateLimited { retry_after }) => *retry_after,
+        _ => None,
+    };
+    ProfileFailure {
+        profile: profile.to_owned(),
+        error: format!("{error:#}"),
+        retry_after_seconds,
+    }
+}
+
 /// Resolve the requested profile set and authenticate independently per profile.
 /// In aggregate mode, one failed profile does not discard other profiles' data.
 pub fn clients_for(selected: Option<&str>, all_profiles: bool) -> Result<ClientCollection> {
@@ -127,13 +176,17 @@ pub fn clients_for(selected: Option<&str>, all_profiles: bool) -> Result<ClientC
         let profiles: Vec<String> = registry.profiles.iter().map(|p| p.name.clone()).collect();
         let mut clients = Vec::new();
         let mut failures = Vec::new();
+        let mut rate_limited = false;
         for profile in registry.profiles {
             match crate::commands::authed_client_for(&profile) {
                 Ok(client) => clients.push(ProfileClient { profile, client }),
-                Err(error) => failures.push(ProfileFailure {
-                    profile: profile.name,
-                    error: format!("{error:#}"),
-                }),
+                Err(error) => {
+                    rate_limited = is_rate_limited(&error);
+                    failures.push(profile_failure(&profile.name, &error));
+                    if rate_limited {
+                        break;
+                    }
+                }
             }
         }
         return Ok(ClientCollection {
@@ -141,6 +194,7 @@ pub fn clients_for(selected: Option<&str>, all_profiles: bool) -> Result<ClientC
             clients,
             failures,
             aggregated: true,
+            rate_limited,
         });
     }
 
@@ -151,6 +205,7 @@ pub fn clients_for(selected: Option<&str>, all_profiles: bool) -> Result<ClientC
         clients: vec![ProfileClient { profile, client }],
         failures: Vec::new(),
         aggregated: false,
+        rate_limited: false,
     })
 }
 

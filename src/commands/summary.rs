@@ -99,6 +99,9 @@ fn run_aggregate(months: i64, mode: OutputMode, mask: bool) -> anyhow::Result<()
     let mut txns = Vec::new();
 
     for entry in entries {
+        if clients.is_rate_limited() {
+            break;
+        }
         let account_key = match crate::commands::aggregate::account_key(&entry) {
             Ok(key) => key.to_owned(),
             Err(error) => {
@@ -115,32 +118,30 @@ fn run_aggregate(months: i64, mode: OutputMode, mask: bool) -> anyhow::Result<()
             source: Some("ALL".to_string()),
             classified: true,
         };
-        let (result, failures) = clients.first_success(&entry.profiles, |profile_client| {
-            match profile_client.client.transactions(&query) {
-                Ok(response) => Ok(response),
-                Err(classified_error)
-                    if matches!(
-                        classified_error,
-                        crate::error::Sb1Error::Api { status: 404, .. }
-                    ) =>
-                {
-                    let fallback_query = TxnQuery {
-                        classified: false,
-                        ..query.clone()
-                    };
-                    match profile_client.client.transactions(&fallback_query) {
-                        Ok(response) => Ok(response),
-                        Err(fallback_error) => Err(anyhow::Error::from(fallback_error).context(
-                            format!("classified endpoint unavailable ({classified_error})"),
-                        )),
-                    }
+        let result = clients.first_success(&entry.profiles, |profile_client| match profile_client
+            .client
+            .transactions(&query)
+        {
+            Ok(response) => Ok(response),
+            Err(classified_error)
+                if matches!(
+                    classified_error,
+                    crate::error::Sb1Error::Api { status: 404, .. }
+                ) =>
+            {
+                let fallback_query = TxnQuery {
+                    classified: false,
+                    ..query.clone()
+                };
+                match profile_client.client.transactions(&fallback_query) {
+                    Ok(response) => Ok(response),
+                    Err(fallback_error) => Err(anyhow::Error::from(fallback_error).context(
+                        format!("classified endpoint unavailable ({classified_error})"),
+                    )),
                 }
-                Err(error) => Err(anyhow::Error::from(error)),
             }
+            Err(error) => Err(anyhow::Error::from(error)),
         });
-        for (profile, error) in failures {
-            clients.add_failure(&profile, error);
-        }
         if let Some((source, response)) = result {
             for error in response.errors {
                 clients.add_failure(&source, error);
