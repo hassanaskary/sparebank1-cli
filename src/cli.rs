@@ -103,6 +103,8 @@ pub enum Command {
 pub enum ProfileAction {
     /// Make an existing profile the default for commands without --profile.
     SetDefault { name: String },
+    /// Rename an existing local profile without changing its bank login.
+    Rename { old_name: String, new_name: String },
 }
 
 #[derive(Debug, Args)]

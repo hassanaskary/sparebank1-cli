@@ -54,6 +54,7 @@ Secret storage backend is chosen with `SB1_STORE` (`keychain` default, `op` for
 - `sb1 login --profile <profile-name>` creates a profile after confirmation or
   reauthenticates that profile. Each person completes their own BankID login.
 - `sb1 profile set-default <profile-name>` changes the default designation.
+- `sb1 profile rename <old-name> <new-name>` renames a profile and preserves its login.
 - `refresh` and `logout` require `--profile` when multiple profiles exist.
 - Transfers always use one profile and require `--profile` when multiple
   profiles exist. Confirm the selected profile in the transfer summary.
