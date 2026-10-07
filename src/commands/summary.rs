@@ -118,20 +118,24 @@ fn run_aggregate(months: i64, mode: OutputMode, mask: bool) -> anyhow::Result<()
         let (result, failures) = clients.first_success(&entry.profiles, |profile_client| {
             match profile_client.client.transactions(&query) {
                 Ok(response) => Ok(response),
-                Err(classified_error) => {
+                Err(classified_error)
+                    if matches!(
+                        classified_error,
+                        crate::error::Sb1Error::Api { status: 404, .. }
+                    ) =>
+                {
                     let fallback_query = TxnQuery {
                         classified: false,
                         ..query.clone()
                     };
-                    profile_client
-                        .client
-                        .transactions(&fallback_query)
-                        .map_err(|fallback_error| {
-                            anyhow::anyhow!(
-                                "classified request failed ({classified_error:#}); fallback failed ({fallback_error:#})"
-                            )
-                        })
+                    match profile_client.client.transactions(&fallback_query) {
+                        Ok(response) => Ok(response),
+                        Err(fallback_error) => Err(anyhow::Error::from(fallback_error).context(
+                            format!("classified endpoint unavailable ({classified_error})"),
+                        )),
+                    }
                 }
+                Err(error) => Err(anyhow::Error::from(error)),
             }
         });
         for (profile, error) in failures {

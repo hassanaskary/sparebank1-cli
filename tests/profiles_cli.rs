@@ -216,6 +216,7 @@ fn fake_bank_status_sequence(
             }
             let reason = match status {
                 200 => "OK",
+                429 => "Too Many Requests",
                 500 => "Internal Server Error",
                 _ => "Error",
             };
@@ -811,7 +812,7 @@ fn transactions_all_profiles_falls_back_to_another_profile_for_a_shared_account(
         vec![
             (200, accounts),
             (200, accounts),
-            (500, r#"{"error":"temporarily unavailable"}"#),
+            (403, r#"{"error":"account not accessible"}"#),
             (200, txn),
         ]
         .into_boxed_slice(),
@@ -837,6 +838,38 @@ fn transactions_all_profiles_falls_back_to_another_profile_for_a_shared_account(
     assert!(requests[3]
         .to_ascii_lowercase()
         .contains("authorization: bearer bob-token"));
+}
+
+#[test]
+fn transactions_all_profiles_stops_fallback_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let accounts = r#"{"accounts":[{"key":"SHARED-KEY","name":"Shared account"}]}"#;
+    let responses: &'static [(u16, &'static str)] = Box::leak(
+        vec![
+            (200, accounts),
+            (200, accounts),
+            (429, r#"{"error":"rate limited"}"#),
+        ]
+        .into_boxed_slice(),
+    );
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "transactions", "Shared account"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["profile"], "alice");
+    assert!(body["errors"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("rate limited"));
+    assert_eq!(requests.join().unwrap().len(), 3);
 }
 
 #[test]
@@ -936,7 +969,7 @@ fn balance_all_profiles_falls_back_to_another_profile_for_a_shared_account() {
         vec![
             (200, accounts),
             (200, accounts),
-            (500, r#"{"error":"unavailable"}"#),
+            (403, r#"{"error":"account not accessible"}"#),
             (200, r#"{"accountNumber":"11112222333","balance":100}"#),
         ]
         .into_boxed_slice(),
@@ -1026,7 +1059,7 @@ fn export_all_profiles_falls_back_when_first_profile_cannot_export_account() {
         vec![
             (200, accounts),
             (200, accounts),
-            (500, r#"{"error":"unavailable"}"#),
+            (403, r#"{"error":"account not accessible"}"#),
             (200, csv),
         ]
         .into_boxed_slice(),
@@ -1104,13 +1137,13 @@ fn summary_all_profiles_uses_an_accessible_fallback_for_a_shared_account() {
     sandbox.configured_pair();
     let accounts = r#"{"accounts":[{"key":"SHARED-KEY","name":"Shared account","accountNumber":"11112222333","balance":100}]}"#;
     let transactions = r#"{"transactions":[{"transaction":{"id":"shared-txn","amount":10}}]}"#;
-    let unavailable = r#"{"error":"temporarily unavailable"}"#;
+    let unavailable = r#"{"error":"account not accessible"}"#;
     let responses: &'static [(u16, &'static str)] = Box::leak(
         vec![
             (200, accounts),
             (200, accounts),
-            (500, unavailable),
-            (500, unavailable),
+            (404, unavailable),
+            (403, unavailable),
             (200, transactions),
         ]
         .into_boxed_slice(),
@@ -1133,6 +1166,38 @@ fn summary_all_profiles_uses_an_accessible_fallback_for_a_shared_account() {
     assert!(requests[4]
         .to_ascii_lowercase()
         .contains("authorization: bearer bob-token"));
+}
+
+#[test]
+fn summary_all_profiles_does_not_retry_or_fallback_after_rate_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let accounts = r#"{"accounts":[{"key":"SHARED-KEY","name":"Shared account","accountNumber":"11112222333","balance":100}]}"#;
+    let responses: &'static [(u16, &'static str)] = Box::leak(
+        vec![
+            (200, accounts),
+            (200, accounts),
+            (429, r#"{"error":"rate limited"}"#),
+        ]
+        .into_boxed_slice(),
+    );
+    let (url, requests) = fake_bank_status_sequence(responses);
+    let result = sandbox
+        .command(&["--json", "--all-profiles", "summary", "--months", "1"])
+        .env("SB1_TEST_API_BASE_URL", url)
+        .output()
+        .unwrap();
+
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["complete"], false);
+    assert_eq!(body["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(body["errors"][0]["profile"], "alice");
+    assert!(body["errors"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("rate limited"));
+    assert_eq!(requests.join().unwrap().len(), 3);
 }
 
 #[test]
