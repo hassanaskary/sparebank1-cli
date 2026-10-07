@@ -14,6 +14,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
+    /// Combine read-only results from every configured profile.
+    #[arg(long, global = true, conflicts_with = "profile")]
+    pub all_profiles: bool,
+
     /// Output machine-readable JSON instead of tables.
     #[arg(long, global = true)]
     pub json: bool,
@@ -326,5 +330,17 @@ mod tests {
             args(&["Brukskonto"], &["Sparekonto"]).account_refs(),
             ["Brukskonto", "Sparekonto"]
         );
+    }
+
+    #[test]
+    fn all_profiles_flag_is_available_for_read_commands() {
+        assert!(Cli::try_parse_from(["sb1", "--all-profiles", "accounts"]).is_ok());
+    }
+
+    #[test]
+    fn profile_and_all_profiles_are_mutually_exclusive() {
+        let parsed =
+            Cli::try_parse_from(["sb1", "--profile", "alice", "--all-profiles", "accounts"]);
+        assert!(parsed.is_err());
     }
 }

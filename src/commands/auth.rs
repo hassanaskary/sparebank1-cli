@@ -236,12 +236,44 @@ fn profile_status(profile: &Profile, registry: &Registry) -> anyhow::Result<serd
     }))
 }
 
-pub fn hello(selected: Option<&str>) -> anyhow::Result<()> {
-    let registry = Registry::load()?;
-    let profile = registry.select(selected, false)?;
-    let client = crate::commands::authed_client_for(&profile)?;
-    let msg = client.hello().context("hello world request failed")?;
-    println!("{msg}");
+pub fn hello(selected: Option<&str>, all_profiles: bool, mode: OutputMode) -> anyhow::Result<()> {
+    let mut clients = crate::commands::aggregate::clients_for(selected, all_profiles)?;
+    if !clients.aggregated {
+        let msg = clients.clients[0]
+            .client
+            .hello()
+            .context("hello world request failed")?;
+        println!("{msg}");
+        return Ok(());
+    }
+
+    let mut results = Vec::new();
+    let mut failures = Vec::new();
+    for entry in &clients.clients {
+        match entry.client.hello() {
+            Ok(message) => results.push(serde_json::json!({
+                "profile": entry.profile.name,
+                "message": message,
+            })),
+            Err(error) => failures.push((entry.profile.name.clone(), error.to_string())),
+        }
+    }
+    for (profile, error) in failures {
+        clients.add_failure(&profile, error);
+    }
+    clients.report_failures();
+    if mode == OutputMode::Json {
+        return crate::format::print_json(&serde_json::json!({
+            "complete": clients.complete(),
+            "profiles": clients.profiles,
+            "results": results,
+            "errors": clients.failures_json(),
+        }));
+    }
+
+    for result in results {
+        println!("{}: {}", result["profile"], result["message"]);
+    }
     Ok(())
 }
 
