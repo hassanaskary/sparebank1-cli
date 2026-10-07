@@ -176,6 +176,7 @@ export SB1_STORE=file
 sb1 status                       # status for every profile
 sb1 status --profile <profile-name>    # status for one profile
 sb1 profile set-default <profile-name>  # choose the implicit profile
+sb1 profile rename <old-name> <new-name> # rename without logging in again
 sb1 hello                        # verify the default profile
 sb1 hello --profile <profile-name>
 sb1 hello --all-profiles         # check every configured profile
@@ -231,6 +232,10 @@ sb1 accounts --mask
 
 Replace `<profile-name>` in these examples with the label you chose when
 creating the profile (for example, `shared`).
+
+`sb1 profile rename <old-name> <new-name>` renames a local profile and keeps
+its saved credentials and token. If the profile is the default, it remains the
+default under its new name.
 
 `--classified` enriches transactions with the bank's own category, recurring,
 and subscription flags. `summary` builds on the same classification, so its

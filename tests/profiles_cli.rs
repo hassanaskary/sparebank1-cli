@@ -531,6 +531,146 @@ fn set_default_outputs_json_when_json_is_requested() {
 }
 
 #[test]
+fn rename_moves_named_profile_secrets_and_preserves_default_selection() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let old_credentials = sandbox
+        .store()
+        .join("profile-616c696365-client-credentials.json");
+    let old_token = sandbox.store().join("profile-616c696365-oauth-token.json");
+    let new_credentials = sandbox
+        .store()
+        .join("profile-6361726f6c-client-credentials.json");
+    let new_token = sandbox.store().join("profile-6361726f6c-oauth-token.json");
+    let credentials = std::fs::read_to_string(&old_credentials).unwrap();
+    let token = std::fs::read_to_string(&old_token).unwrap();
+
+    let renamed = sandbox.run(&["--json", "profile", "rename", "alice", "carol"]);
+    assert!(
+        renamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    let output: serde_json::Value = serde_json::from_slice(&renamed.stdout).unwrap();
+    assert_eq!(
+        output,
+        serde_json::json!({"oldProfile": "alice", "newProfile": "carol", "defaultProfile": "carol"})
+    );
+
+    let status = sandbox.run(&["--json", "status"]);
+    let body: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(body["defaultProfile"], "carol");
+    assert_eq!(body["profiles"][0]["name"], "carol");
+    assert_eq!(body["profiles"][0]["legacyContext"], false);
+    assert_eq!(body["profiles"][1]["name"], "bob");
+    assert_eq!(
+        std::fs::read_to_string(&new_credentials).unwrap(),
+        credentials
+    );
+    assert_eq!(std::fs::read_to_string(&new_token).unwrap(), token);
+    assert!(!old_credentials.exists());
+    assert!(!old_token.exists());
+}
+
+#[test]
+fn rename_preserves_legacy_profile_secret_keys() {
+    let sandbox = Sandbox::new();
+    let credentials = r#"{"client_id":"legacy-id","client_secret":"legacy-secret","redirect_uri":"http://localhost:12345/callback"}"#;
+    let token = r#"{"access_token":"legacy-token","refresh_token":"legacy-refresh","token_type":"Bearer","expires_at":4102444800}"#;
+    let credentials_path = sandbox.store().join("client-credentials.json");
+    let token_path = sandbox.store().join("oauth-token.json");
+    std::fs::write(&credentials_path, credentials).unwrap();
+    std::fs::write(&token_path, token).unwrap();
+
+    let renamed = sandbox.run(&["profile", "rename", "default", "personal"]);
+    assert!(
+        renamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&renamed.stderr)
+    );
+    let registry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(sandbox.store().join("profiles.json")).unwrap())
+            .unwrap();
+    assert_eq!(registry["defaultProfile"], "personal");
+    assert_eq!(registry["profiles"][0]["name"], "personal");
+    assert_eq!(registry["profiles"][0]["legacy"], true);
+    assert_eq!(
+        std::fs::read_to_string(credentials_path).unwrap(),
+        credentials
+    );
+    assert_eq!(std::fs::read_to_string(token_path).unwrap(), token);
+    let status = sandbox.run(&["--json", "status"]);
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["profiles"][0]["name"], "personal");
+    assert_eq!(status["profiles"][0]["loggedIn"], true);
+    assert_eq!(status["profiles"][0]["hasStoredCredentials"], true);
+    assert!(!sandbox
+        .store()
+        .join("profile-706572736f6e616c-client-credentials.json")
+        .exists());
+}
+
+#[test]
+fn rename_refuses_an_existing_profile_name_without_changing_any_storage() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let registry_path = sandbox.store().join("profiles.json");
+    let registry_before = std::fs::read(&registry_path).unwrap();
+    let alice_credentials_path = sandbox
+        .store()
+        .join("profile-616c696365-client-credentials.json");
+    let alice_token_path = sandbox.store().join("profile-616c696365-oauth-token.json");
+    let credentials_before = std::fs::read(&alice_credentials_path).unwrap();
+    let token_before = std::fs::read(&alice_token_path).unwrap();
+
+    let renamed = sandbox.run(&["profile", "rename", "alice", "bob"]);
+    assert!(!renamed.status.success());
+    assert!(String::from_utf8_lossy(&renamed.stderr).contains("already exists"));
+    assert_eq!(std::fs::read(registry_path).unwrap(), registry_before);
+    assert_eq!(
+        std::fs::read(alice_credentials_path).unwrap(),
+        credentials_before
+    );
+    assert_eq!(std::fs::read(alice_token_path).unwrap(), token_before);
+}
+
+#[test]
+fn rename_refuses_orphan_destination_secrets_without_changing_source() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let registry_path = sandbox.store().join("profiles.json");
+    let registry_before = std::fs::read(&registry_path).unwrap();
+    let source_credentials = sandbox
+        .store()
+        .join("profile-616c696365-client-credentials.json");
+    let source_token = sandbox.store().join("profile-616c696365-oauth-token.json");
+    let credentials_before = std::fs::read(&source_credentials).unwrap();
+    let token_before = std::fs::read(&source_token).unwrap();
+    let destination_token = sandbox.store().join("profile-6361726f6c-oauth-token.json");
+    let orphan_token = r#"{"access_token":"orphan-token","expires_at":4102444800}"#;
+    std::fs::write(&destination_token, orphan_token).unwrap();
+
+    let renamed = sandbox.run(&["profile", "rename", "alice", "carol"]);
+    assert!(!renamed.status.success());
+    assert!(String::from_utf8_lossy(&renamed.stderr)
+        .contains("storage for the new name already exists"));
+    assert_eq!(std::fs::read(registry_path).unwrap(), registry_before);
+    assert_eq!(
+        std::fs::read(source_credentials).unwrap(),
+        credentials_before
+    );
+    assert_eq!(std::fs::read(source_token).unwrap(), token_before);
+    assert!(!sandbox
+        .store()
+        .join("profile-6361726f6c-client-credentials.json")
+        .exists());
+    assert_eq!(
+        std::fs::read_to_string(destination_token).unwrap(),
+        orphan_token
+    );
+}
+
+#[test]
 fn logout_requires_selection_with_multiple_profiles_and_only_clears_selected_profile() {
     let sandbox = Sandbox::new();
     sandbox.configured_pair();

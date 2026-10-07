@@ -48,6 +48,8 @@ independently authenticated profile. `CLIENT_ID` and `CLIENT_SECRET` in `.env`
 provide one credential pair for initial setup; pass another profile's client
 credentials with `--client-id` and `--client-secret` (or environment
 variables). `sb1 profile set-default <profile-name>` changes the designation.
+`sb1 profile rename <old-name> <new-name>` changes a profile's local name
+without requiring a new BankID login; the default designation follows the rename.
 `refresh` and `logout` require `--profile` when multiple profiles exist.
 Read-only commands accept `--all-profiles` to combine results from every
 configured profile: `hello`, `accounts`, `account`, `balance`, `transactions`,

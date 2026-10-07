@@ -130,6 +130,25 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                     Ok(())
                 }
             }
+            ProfileAction::Rename { old_name, new_name } => {
+                let cleanup_warning = crate::profiles::rename_profile(&old_name, &new_name)?;
+                let default_profile = crate::profiles::Registry::load()?.default_profile;
+                if mode == OutputMode::Json {
+                    crate::format::print_json(&serde_json::json!({
+                        "oldProfile": old_name,
+                        "newProfile": new_name,
+                        "defaultProfile": default_profile,
+                    }))?;
+                } else {
+                    println!("Renamed profile '{old_name}' to '{new_name}'.");
+                }
+                if let Some(warning) = cleanup_warning {
+                    eprintln!(
+                        "Warning: profile was renamed, but old secret entries could not be removed: {warning}"
+                    );
+                }
+                Ok(())
+            }
         },
         Command::Login(args) => auth::login(args, selected),
         Command::Logout { all } => auth::logout(all, selected),
