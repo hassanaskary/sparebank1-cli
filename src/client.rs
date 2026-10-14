@@ -14,6 +14,21 @@ use crate::models::*;
 
 const BASE: &str = "https://api.sparebank1.no/personal/banking";
 const HELLOWORLD: &str = "https://api.sparebank1.no/common/helloworld";
+fn api_url(path: &str) -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(base) = std::env::var("SB1_TEST_API_BASE_URL") {
+        return format!("{}/personal/banking/{path}", base.trim_end_matches('/'));
+    }
+    format!("{BASE}/{path}")
+}
+
+fn hello_url() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(base) = std::env::var("SB1_TEST_API_BASE_URL") {
+        return format!("{}/common/helloworld", base.trim_end_matches('/'));
+    }
+    HELLOWORLD.to_owned()
+}
 const ACCEPT_V1: &str = "application/vnd.sparebank1.v1+json; charset=utf-8";
 const UA: &str = concat!(
     "sparebank1-cli/",
@@ -65,7 +80,7 @@ impl ApiClient {
 
     /// `GET /common/helloworld`, verifies authentication end to end.
     pub fn hello(&self) -> Result<String> {
-        let resp = self.get(HELLOWORLD).send()?;
+        let resp = self.get(&hello_url()).send()?;
         let resp = check(resp)?;
         let v: serde_json::Value = resp.json()?;
         Ok(v.get("message")
@@ -78,7 +93,7 @@ impl ApiClient {
 
     /// `GET /accounts`, with optional include-type toggles.
     pub fn accounts(&self, opts: &AccountListOpts) -> Result<Vec<Account>> {
-        let mut req = self.get(&format!("{BASE}/accounts"));
+        let mut req = self.get(&api_url("accounts"));
         let mut q: Vec<(&str, &str)> = Vec::new();
         if opts.include_credit_cards {
             q.push(("includeCreditCardAccounts", "true"));
@@ -105,29 +120,32 @@ impl ApiClient {
 
     /// `GET /accounts/{accountKey}`.
     pub fn account(&self, key: &str) -> Result<Account> {
-        let resp = check(self.get(&format!("{BASE}/accounts/{key}")).send()?)?;
+        let resp = check(self.get(&api_url(&format!("accounts/{key}"))).send()?)?;
         Ok(resp.json()?)
     }
 
     /// `GET /accounts/{accountKey}/details`, raw JSON (loose schema).
     pub fn account_details(&self, key: &str) -> Result<serde_json::Value> {
-        let resp = check(self.get(&format!("{BASE}/accounts/{key}/details")).send()?)?;
+        let resp = check(
+            self.get(&api_url(&format!("accounts/{key}/details")))
+                .send()?,
+        )?;
         Ok(resp.json()?)
     }
 
     /// `GET /accounts/{accountKey}/roles`.
     pub fn account_roles(&self, key: &str) -> Result<Roles> {
-        let resp = check(self.get(&format!("{BASE}/accounts/{key}/roles")).send()?)?;
+        let resp = check(
+            self.get(&api_url(&format!("accounts/{key}/roles")))
+                .send()?,
+        )?;
         Ok(resp.json()?)
     }
 
     /// `POST /accounts/balance`, balance by account number.
     pub fn balance(&self, account_number: &str) -> Result<Balance> {
         let body = serde_json::json!({ "accountNumber": account_number });
-        let resp = check(
-            self.post_json(&format!("{BASE}/accounts/balance"), &body)
-                .send()?,
-        )?;
+        let resp = check(self.post_json(&api_url("accounts/balance"), &body).send()?)?;
         Ok(resp.json()?)
     }
 
@@ -143,7 +161,7 @@ impl ApiClient {
         } else {
             "transactions"
         };
-        let mut req = self.get(&format!("{BASE}/{path}"));
+        let mut req = self.get(&api_url(path));
         let mut q: Vec<(&str, String)> = Vec::new();
         for key in &opts.account_keys {
             q.push(("accountKey", key.clone()));
@@ -181,9 +199,9 @@ impl ApiClient {
     /// `GET /transactions/{id}/details` (or `.../details/classified`).
     pub fn transaction_details(&self, id: &str, classified: bool) -> Result<serde_json::Value> {
         let path = if classified {
-            format!("{BASE}/transactions/{id}/details/classified")
+            api_url(&format!("transactions/{id}/details/classified"))
         } else {
-            format!("{BASE}/transactions/{id}/details")
+            api_url(&format!("transactions/{id}/details"))
         };
         let resp = check(self.get(&path).send()?)?;
         Ok(resp.json()?)
@@ -209,7 +227,7 @@ impl ApiClient {
         // override Accept here (the default JSON Accept yields HTTP 406).
         let req = self
             .http
-            .get(format!("{BASE}/transactions/export"))
+            .get(api_url("transactions/export"))
             .header(ACCEPT, "application/csv;charset=UTF-8")
             .bearer_auth(&self.token)
             .header(USER_AGENT, UA)
@@ -222,17 +240,14 @@ impl ApiClient {
 
     /// `POST /transfer/debit`, domestic/own-account payment.
     pub fn transfer_debit(&self, req: &DebitTransferRequest) -> Result<TransferResponse> {
-        let resp = check(
-            self.post_json(&format!("{BASE}/transfer/debit"), req)
-                .send()?,
-        )?;
+        let resp = check(self.post_json(&api_url("transfer/debit"), req).send()?)?;
         Ok(resp.json()?)
     }
 
     /// `POST /transfer/creditcard/transferTo`.
     pub fn transfer_creditcard(&self, req: &CreditCardTransferRequest) -> Result<TransferResponse> {
         let resp = check(
-            self.post_json(&format!("{BASE}/transfer/creditcard/transferTo"), req)
+            self.post_json(&api_url("transfer/creditcard/transferTo"), req)
                 .send()?,
         )?;
         Ok(resp.json()?)
@@ -240,10 +255,7 @@ impl ApiClient {
 
     /// `POST /transfer/pension`.
     pub fn transfer_pension(&self, req: &PensionTransferRequest) -> Result<TransferResponse> {
-        let resp = check(
-            self.post_json(&format!("{BASE}/transfer/pension"), req)
-                .send()?,
-        )?;
+        let resp = check(self.post_json(&api_url("transfer/pension"), req).send()?)?;
         Ok(resp.json()?)
     }
 }

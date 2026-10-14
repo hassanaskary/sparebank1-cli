@@ -11,7 +11,7 @@
 //! Per terms §3 the client secret has limited validity; a rejected secret here
 //! is mapped to [`Sb1Error::InvalidClientCredentials`] with a rotate-it message.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::error::{Result, Sb1Error};
+use crate::profiles::Profile;
 use crate::secrets::{self, ClientCredentials, StoredToken};
 
 const AUTH_URL: &str = "https://api.sparebank1.no/oauth/authorize";
@@ -65,7 +66,7 @@ impl TokenResponse {
     }
 }
 
-/// Run the interactive BankID login and persist the resulting token.
+/// Run the interactive BankID login and return the resulting token.
 ///
 /// `port` is parsed from the redirect URI; we bind a loopback listener there to
 /// catch the authorization code.
@@ -94,7 +95,7 @@ pub fn login(creds: &ClientCredentials) -> Result<StoredToken> {
 
     eprintln!("Opening your browser for BankID login…");
     eprintln!("If it doesn't open, visit:\n  {authorize}\n");
-    let _ = webbrowser::open(authorize.as_str());
+    open_authorize_page(authorize.as_str());
 
     let (code, returned_state) = wait_for_callback(&listener, &path)?;
     if returned_state.as_deref() != Some(state.as_str()) {
@@ -105,25 +106,32 @@ pub fn login(creds: &ClientCredentials) -> Result<StoredToken> {
     let code = code.ok_or_else(|| Sb1Error::AuthFlow("no authorization code received".into()))?;
 
     let token = exchange_code(creds, &code)?;
-    secrets::save_token(&token)?;
     Ok(token)
+}
+
+fn open_authorize_page(url: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("SB1_TEST_NO_BROWSER").is_some() {
+        return;
+    }
+    let _ = webbrowser::open(url);
 }
 
 /// Return a valid access token, refreshing or erroring as needed.
 ///
 /// Never triggers an interactive login on its own, that is reserved for the
 /// explicit `login` command so non-interactive use fails loudly.
-pub fn valid_access_token() -> Result<String> {
-    let token = secrets::load_token()?.ok_or(Sb1Error::NotAuthenticated)?;
+pub fn valid_access_token(profile: &Profile) -> Result<String> {
+    let token = secrets::load_token_for(profile)?.ok_or(Sb1Error::NotAuthenticated)?;
     if token.is_valid() {
         return Ok(token.access_token);
     }
     // Expired: try a refresh if we have the means.
-    let creds = secrets::load_credentials()?;
+    let creds = secrets::load_credentials_for(profile)?;
     match (token.refresh_token.clone(), creds) {
         (Some(rt), Some(creds)) => {
             let refreshed = refresh(&creds, &rt)?;
-            secrets::save_token(&refreshed)?;
+            secrets::save_token_for(profile, &refreshed)?;
             Ok(refreshed.access_token)
         }
         _ => Err(Sb1Error::NotAuthenticated),
@@ -131,19 +139,19 @@ pub fn valid_access_token() -> Result<String> {
 }
 
 /// Force a refresh using the stored refresh token. Returns the new token.
-pub fn force_refresh() -> Result<StoredToken> {
-    let token = secrets::load_token()?.ok_or(Sb1Error::NotAuthenticated)?;
-    let creds = secrets::load_credentials()?.ok_or(Sb1Error::NotAuthenticated)?;
+pub fn force_refresh(profile: &Profile) -> Result<StoredToken> {
+    let token = secrets::load_token_for(profile)?.ok_or(Sb1Error::NotAuthenticated)?;
+    let creds = secrets::load_credentials_for(profile)?.ok_or(Sb1Error::NotAuthenticated)?;
     let rt = token
         .refresh_token
         .ok_or_else(|| Sb1Error::AuthFlow("no refresh token stored".into()))?;
     let refreshed = refresh(&creds, &rt)?;
-    secrets::save_token(&refreshed)?;
+    secrets::save_token_for(profile, &refreshed)?;
     Ok(refreshed)
 }
 
 fn build_authorize_url(creds: &ClientCredentials, state: &str) -> Result<Url> {
-    let mut url = Url::parse(AUTH_URL).map_err(|e| Sb1Error::AuthFlow(e.to_string()))?;
+    let mut url = Url::parse(&authorize_url()).map_err(|e| Sb1Error::AuthFlow(e.to_string()))?;
     // NB: no `finInst` hint, the authorize page lets the user pick their bank.
     // Hardcoding the wrong institution causes `access_denied`.
     url.query_pairs_mut()
@@ -153,6 +161,14 @@ fn build_authorize_url(creds: &ClientCredentials, state: &str) -> Result<Url> {
         .append_pair("state", state)
         .append_pair("scope", &scope_from_env());
     Ok(url)
+}
+
+fn authorize_url() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(base) = std::env::var("SB1_TEST_API_BASE_URL") {
+        return format!("{}/oauth/authorize", base.trim_end_matches('/'));
+    }
+    AUTH_URL.to_owned()
 }
 
 fn exchange_code(creds: &ClientCredentials, code: &str) -> Result<StoredToken> {
@@ -178,7 +194,7 @@ fn refresh(creds: &ClientCredentials, refresh_token: &str) -> Result<StoredToken
 
 fn post_token(params: &[(&str, &str)]) -> Result<StoredToken> {
     let client = crate::client::http_agent()?;
-    let resp = client.post(TOKEN_URL).form(params).send()?;
+    let resp = client.post(token_url()).form(params).send()?;
     let status = resp.status();
     if status.is_success() {
         let body: TokenResponse = resp.json()?;
@@ -200,6 +216,14 @@ fn post_token(params: &[(&str, &str)]) -> Result<StoredToken> {
     })
 }
 
+fn token_url() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(base) = std::env::var("SB1_TEST_API_BASE_URL") {
+        return format!("{}/oauth/token", base.trim_end_matches('/'));
+    }
+    TOKEN_URL.to_owned()
+}
+
 /// Block until the browser hits our callback path, returning `(code, state)`.
 fn wait_for_callback(
     listener: &TcpListener,
@@ -212,7 +236,7 @@ fn wait_for_callback(
     // A single accept with a read timeout keeps this simple; the browser hits us
     // once. We loop only to skip unrelated requests (e.g. favicon).
     let deadline = std::time::Instant::now() + CALLBACK_TIMEOUT;
-    for conn in listener.incoming() {
+    'connections: for conn in listener.incoming() {
         if std::time::Instant::now() > deadline {
             break;
         }
@@ -222,9 +246,29 @@ fn wait_for_callback(
         };
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
+        let mut request = Vec::new();
         let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf).unwrap_or(0);
-        let request = String::from_utf8_lossy(&buf[..n]);
+        loop {
+            let n = match stream.read(&mut buf) {
+                Ok(n) => n,
+                // Browsers may open an idle connection before the real callback.
+                // Discard it after the read timeout and keep waiting for BankID.
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    continue 'connections;
+                }
+                Err(e) => {
+                    return Err(Sb1Error::AuthFlow(format!("reading OAuth callback: {e}")));
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
         let request_line = request.lines().next().unwrap_or("");
         // "GET /callback?code=...&state=... HTTP/1.1"
         let target = request_line.split_whitespace().nth(1).unwrap_or("");

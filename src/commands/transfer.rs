@@ -10,23 +10,24 @@ use std::io::{self, Write};
 use anyhow::{anyhow, bail, Context};
 
 use crate::cli::{CreditcardArgs, DebitArgs, PensionArgs, TransferKind};
-use crate::commands::{authed_client, resolve_account};
+use crate::commands::{authed_client_for, resolve_account};
 use crate::format::OutputMode;
 use crate::models::{
     CreditCardTransferRequest, DebitTransferRequest, PensionTransferRequest, TransferResponse,
 };
+use crate::profiles::Profile;
 use crate::util::format_kr;
 
-pub fn run(kind: TransferKind, mode: OutputMode) -> anyhow::Result<()> {
+pub fn run(kind: TransferKind, mode: OutputMode, profile: &Profile) -> anyhow::Result<()> {
     match kind {
-        TransferKind::Debit(args) => debit(args, mode),
-        TransferKind::Creditcard(args) => creditcard(args, mode),
-        TransferKind::Pension(args) => pension(args, mode),
+        TransferKind::Debit(args) => debit(args, mode, profile),
+        TransferKind::Creditcard(args) => creditcard(args, mode, profile),
+        TransferKind::Pension(args) => pension(args, mode, profile),
     }
 }
 
-fn debit(args: DebitArgs, mode: OutputMode) -> anyhow::Result<()> {
-    let client = authed_client()?;
+fn debit(args: DebitArgs, mode: OutputMode, profile: &Profile) -> anyhow::Result<()> {
+    let client = authed_client_for(profile)?;
     let amount = normalize_amount(&args.amount)?;
 
     let from = resolve_account(&client, &args.from).context("resolving --from account")?;
@@ -44,7 +45,8 @@ fn debit(args: DebitArgs, mode: OutputMode) -> anyhow::Result<()> {
     }
 
     let summary = format!(
-        "Transfer {amount_disp}\n  from: {from_name} ({from_no})\n    to: {to_name} ({to_no}){msg}{due}",
+        "Transfer {amount_disp}\n  profile: {profile}\n  from: {from_name} ({from_no})\n    to: {to_name} ({to_no}){msg}{due}",
+        profile = profile.name,
         amount_disp = format_kr(amount.parse::<f64>().unwrap_or(0.0)),
         from_name = from.name,
         from_no = from.number(),
@@ -78,13 +80,14 @@ fn debit(args: DebitArgs, mode: OutputMode) -> anyhow::Result<()> {
     report(&resp, mode)
 }
 
-fn creditcard(args: CreditcardArgs, mode: OutputMode) -> anyhow::Result<()> {
-    let client = authed_client()?;
+fn creditcard(args: CreditcardArgs, mode: OutputMode, profile: &Profile) -> anyhow::Result<()> {
+    let client = authed_client_for(profile)?;
     let amount = normalize_amount(&args.amount)?;
     let from = resolve_account(&client, &args.from).context("resolving --from account")?;
 
     let summary = format!(
-        "Pay credit card {cc}\n  from: {from_name} ({from_no})\n amount: {amt}",
+        "Pay credit card {cc}\n  profile: {profile}\n  from: {from_name} ({from_no})\n amount: {amt}",
+        profile = profile.name,
         cc = args.credit_card_id,
         from_name = from.name,
         from_no = from.number(),
@@ -107,13 +110,14 @@ fn creditcard(args: CreditcardArgs, mode: OutputMode) -> anyhow::Result<()> {
     report(&resp, mode)
 }
 
-fn pension(args: PensionArgs, mode: OutputMode) -> anyhow::Result<()> {
-    let client = authed_client()?;
+fn pension(args: PensionArgs, mode: OutputMode, profile: &Profile) -> anyhow::Result<()> {
+    let client = authed_client_for(profile)?;
     let amount = normalize_amount(&args.amount)?;
     let from = resolve_account(&client, &args.from).context("resolving --from account")?;
 
     let summary = format!(
-        "Transfer to pension policy {pol}\n  from: {from_name} ({from_no})\n amount: {amt}",
+        "Transfer to pension policy {pol}\n  profile: {profile}\n  from: {from_name} ({from_no})\n amount: {amt}",
+        profile = profile.name,
         pol = args.policy_number,
         from_name = from.name,
         from_no = from.number(),

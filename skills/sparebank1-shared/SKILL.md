@@ -35,7 +35,21 @@ interactive BankID flow.
 sb1 status     # logged in? token expiry? which storage backend?
 sb1 refresh    # force a token refresh
 sb1 logout     # remove the token (add --all to also drop client credentials)
+sb1 status --profile <profile-name>
+sb1 refresh --profile <profile-name>
 ```
+
+Each local profile has its own credentials and tokens. `sb1 status` lists
+profiles and marks the default. Read commands and `hello` use the default unless
+`--profile <profile-name>` is supplied. `sb1 login --profile <profile-name>`
+creates a profile after confirmation or reauthenticates it; each person
+completes their own BankID login. Use a separate personal client for each
+independently authenticated profile. `CLIENT_ID` and `CLIENT_SECRET` in `.env`
+provide one credential pair for initial setup; pass another profile's client
+credentials with `--client-id` and `--client-secret` (or environment
+variables). `sb1 profile set-default <profile-name>` changes the designation.
+`refresh` and `logout` require `--profile` when multiple profiles exist.
+Phase 1 has no aggregate banking-data commands.
 
 Tokens auto-refresh before expiry; the user normally does not re-login between
 sessions. Secrets live in one of three backends, chosen by `SB1_STORE`:
@@ -45,6 +59,10 @@ sessions. Secrets live in one of three backends, chosen by `SB1_STORE`:
 | _unset_ / `keychain` | OS keychain (macOS Keychain / Linux keyutils / Windows Credential Manager), **default** |
 | `op` / `1password` | 1Password via the `op` CLI (`SB1_OP_VAULT`, `SB1_OP_ACCOUNT`) |
 | `file` | `~/.config/sparebank1-cli/*.json` (0600), **plaintext, opt-in** for headless/automation |
+
+When more than one profile exists, transfers also require `--profile`. The
+confirmation summary names the selected profile. `accounts --all` selects all
+account types for one profile; it does not combine profiles.
 
 If a command reports "not logged in" or the client secret is rejected, tell the
 user to run `sb1 login` (the secret has limited validity and may need rotating

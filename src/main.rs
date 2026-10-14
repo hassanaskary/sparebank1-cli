@@ -11,6 +11,7 @@ mod commands;
 mod error;
 mod format;
 mod models;
+mod profiles;
 mod secrets;
 mod terms;
 mod util;

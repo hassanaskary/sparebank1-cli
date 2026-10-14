@@ -15,6 +15,7 @@ Read-only workflows for SpareBank 1 accounts and transactions via `sb1`. Read
 sb1 accounts                      # list (name, number, balance, currency, key)
 sb1 accounts --all                # also include cards/BSU/ASK/pension/currency
 sb1 --json accounts               # machine-readable
+sb1 accounts --profile <profile-name>  # select another local profile
 ```
 
 Individual account (by name, key, or number):
@@ -74,6 +75,11 @@ income vs spending (internal transfers between the user's own accounts are
 excluded), monthly breakdown, spending by **bank-assigned category**, top
 counterparties, and bank-flagged subscriptions. Prefer this over hand-rolled
 analysis.
+
+Read commands use the default profile unless `--profile <profile-name>` is supplied.
+Every account, balance, transaction, detail lookup, export, and summary request
+in phase 1 is scoped to that one profile. `accounts --all` includes account
+types within the selected profile; it does not combine profiles.
 
 ## Manual analysis pattern
 

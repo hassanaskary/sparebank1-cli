@@ -47,6 +47,19 @@ and a BankID login. You cannot do these steps for them:
 Secret storage backend is chosen with `SB1_STORE` (`keychain` default, `op` for
 1Password, `file` for headless automation). See `README.md` → "Secret storage".
 
+## Profiles
+
+- Use `sb1 status` to list profiles and identify the default. Banking read
+  commands use the default profile unless `--profile <profile-name>` is supplied.
+- `sb1 login --profile <profile-name>` creates a profile after confirmation or
+  reauthenticates that profile. Each person completes their own BankID login.
+- `sb1 profile set-default <profile-name>` changes the default designation.
+- `refresh` and `logout` require `--profile` when multiple profiles exist.
+- Transfers always use one profile and require `--profile` when multiple
+  profiles exist. Confirm the selected profile in the transfer summary.
+- Profiles isolate credentials and tokens. Phase 1 has no combined banking
+  data view; `accounts --all` means all account types within one profile.
+
 ## Install the agent skills
 
 The repo ships skills that teach an agent to drive `sb1` safely:
@@ -72,3 +85,5 @@ npx skills add magnusrodseth/sparebank1-cli
   them.
 - Check `sb1 status` if commands fail with auth errors; the token may need
   `sb1 refresh` or a fresh `sb1 login`.
+- When multiple profiles exist, pass `--profile` to `refresh`, `logout`, and
+  transfers. Never infer a transfer profile from an account label.

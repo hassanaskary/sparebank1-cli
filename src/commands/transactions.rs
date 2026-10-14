@@ -6,12 +6,13 @@ use anyhow::Context;
 
 use crate::cli::{ExportArgs, TxnArgs};
 use crate::client::TxnQuery;
-use crate::commands::{authed_client, resolve_account};
+use crate::commands::resolve_account;
 use crate::format::{self, OutputMode};
+use crate::profiles::Profile;
 use crate::util;
 
-pub fn list(args: TxnArgs, mode: OutputMode, mask: bool) -> anyhow::Result<()> {
-    let client = authed_client()?;
+pub fn list(args: TxnArgs, mode: OutputMode, mask: bool, profile: &Profile) -> anyhow::Result<()> {
+    let client = crate::commands::authed_client_for(profile)?;
 
     // Resolve each account reference (positional or -a/--account) to its key.
     // If none given, use all accounts.
@@ -94,16 +95,16 @@ pub fn list(args: TxnArgs, mode: OutputMode, mask: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn show(id: String, classified: bool) -> anyhow::Result<()> {
-    let client = authed_client()?;
+pub fn show(id: String, classified: bool, profile: &Profile) -> anyhow::Result<()> {
+    let client = crate::commands::authed_client_for(profile)?;
     let details = client
         .transaction_details(&id, classified)
         .context("fetching transaction details")?;
     format::print_json(&details)
 }
 
-pub fn export(args: ExportArgs) -> anyhow::Result<()> {
-    let client = authed_client()?;
+pub fn export(args: ExportArgs, profile: &Profile) -> anyhow::Result<()> {
+    let client = crate::commands::authed_client_for(profile)?;
     let account = resolve_account(&client, &args.account)?;
     let from = args.from.clone().unwrap_or_else(|| util::days_ago(90));
     let to = args.to.clone().unwrap_or_else(util::today);

@@ -10,6 +10,10 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "sb1", version, about, long_about = None)]
 pub struct Cli {
+    /// Select a locally configured banking profile.
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
+
     /// Output machine-readable JSON instead of tables.
     #[arg(long, global = true)]
     pub json: bool,
@@ -26,12 +30,17 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Authenticate with BankID and store the token in the keychain.
+    /// Manage local profile selection.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+    /// Authenticate with BankID and store the token for a local profile.
     Login(LoginArgs),
 
-    /// Remove the stored token (and optionally the client credentials).
+    /// Remove the selected profile's token (and optionally its client credentials).
     Logout {
-        /// Also delete stored client id/secret from the keychain.
+        /// Also delete the selected profile's stored client id/secret.
         #[arg(long)]
         all: bool,
     },
@@ -86,18 +95,24 @@ pub enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum ProfileAction {
+    /// Make an existing profile the default for commands without --profile.
+    SetDefault { name: String },
+}
+
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// OAuth client id (else read from keychain, env, or .env).
-    #[arg(long, env = "CLIENT_ID")]
+    /// OAuth client id (else read from this profile, env, or .env).
+    #[arg(long)]
     pub client_id: Option<String>,
-    /// OAuth client secret (else read from keychain, env, or .env).
-    #[arg(long, env = "CLIENT_SECRET")]
+    /// OAuth client secret (else read from this profile, env, or .env).
+    #[arg(long)]
     pub client_secret: Option<String>,
     /// Registered redirect URI (default http://localhost:12345/callback).
     #[arg(long, env = "REDIRECT_URL")]
     pub redirect_uri: Option<String>,
-    /// Do not persist client credentials to the keychain (token only).
+    /// Do not persist client credentials to the selected profile (token only).
     #[arg(long)]
     pub no_save_credentials: bool,
 }

@@ -4,11 +4,17 @@ use anyhow::Context;
 
 use crate::cli::{AccountArgs, AccountsArgs};
 use crate::client::AccountListOpts;
-use crate::commands::{authed_client, resolve_account};
+use crate::commands::resolve_account;
 use crate::format::{self, OutputMode};
+use crate::profiles::Profile;
 
-pub fn list(args: AccountsArgs, mode: OutputMode, mask: bool) -> anyhow::Result<()> {
-    let client = authed_client()?;
+pub fn list(
+    args: AccountsArgs,
+    mode: OutputMode,
+    mask: bool,
+    profile: &Profile,
+) -> anyhow::Result<()> {
+    let client = crate::commands::authed_client_for(profile)?;
     let all = args.all;
     let opts = AccountListOpts {
         include_credit_cards: all || args.credit_cards,
@@ -33,8 +39,13 @@ pub fn list(args: AccountsArgs, mode: OutputMode, mask: bool) -> anyhow::Result<
     }
 }
 
-pub fn show(args: AccountArgs, mode: OutputMode, mask: bool) -> anyhow::Result<()> {
-    let client = authed_client()?;
+pub fn show(
+    args: AccountArgs,
+    mode: OutputMode,
+    mask: bool,
+    profile: &Profile,
+) -> anyhow::Result<()> {
+    let client = crate::commands::authed_client_for(profile)?;
     let account = resolve_account(&client, &args.account)?;
 
     if args.roles {
@@ -62,8 +73,8 @@ pub fn show(args: AccountArgs, mode: OutputMode, mask: bool) -> anyhow::Result<(
     }
 }
 
-pub fn balance(account_number: String) -> anyhow::Result<()> {
-    let client = authed_client()?;
+pub fn balance(account_number: String, profile: &Profile) -> anyhow::Result<()> {
+    let client = crate::commands::authed_client_for(profile)?;
     let digits: String = account_number
         .chars()
         .filter(|c| c.is_ascii_digit())
