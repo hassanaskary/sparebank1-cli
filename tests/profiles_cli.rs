@@ -391,6 +391,11 @@ fn status_adopts_legacy_login_without_moving_its_secrets() {
     assert_eq!(body["profiles"][0]["name"], "default");
     assert_eq!(body["profiles"][0]["tokenValid"], true);
     assert_eq!(body["profiles"][0]["legacyContext"], true);
+    assert_eq!(body["loggedIn"], true);
+    assert_eq!(body["tokenValid"], true);
+    assert_eq!(body["hasStoredCredentials"], true);
+    assert!(body["expiresAt"].is_string());
+    assert_eq!(body["expiresAt"], body["profiles"][0]["expiresAt"]);
     assert_eq!(
         std::fs::read_to_string(sandbox.store().join("client-credentials.json")).unwrap(),
         credentials
@@ -406,6 +411,82 @@ fn status_adopts_legacy_login_without_moving_its_secrets() {
         std::fs::read_to_string(sandbox.store().join("profiles.json")).unwrap(),
         mapping
     );
+}
+
+#[test]
+fn status_preserves_logged_out_json_fields_without_profiles() {
+    let sandbox = Sandbox::new();
+    let result = sandbox.run(&["--json", "status"]);
+    assert!(result.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(body["loggedIn"], false);
+    assert_eq!(body["tokenValid"], false);
+    assert_eq!(body["hasStoredCredentials"], false);
+    assert!(body.get("expiresAt").is_some_and(|value| value.is_null()));
+    assert!(body["defaultProfile"].is_null());
+    assert!(body["profiles"].as_array().unwrap().is_empty());
+    assert!(body["storageBackend"].is_string());
+    assert!(body["supportedBackends"].is_array());
+}
+
+#[test]
+fn status_json_fields_follow_default_and_explicit_profile_selection() {
+    let sandbox = Sandbox::new();
+    sandbox.configured_pair();
+    let bob_token = sandbox.store().join("profile-626f62-oauth-token.json");
+    std::fs::write(
+        &bob_token,
+        r#"{"access_token":"expired-bob","expires_at":1}"#,
+    )
+    .unwrap();
+    std::fs::remove_file(
+        sandbox
+            .store()
+            .join("profile-626f62-client-credentials.json"),
+    )
+    .unwrap();
+
+    let implicit = sandbox.run(&["--json", "status"]);
+    assert!(implicit.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&implicit.stdout).unwrap();
+    assert_eq!(body["loggedIn"], true);
+    assert_eq!(body["tokenValid"], true);
+    assert_eq!(body["hasStoredCredentials"], true);
+    assert_eq!(body["expiresAt"], body["profiles"][0]["expiresAt"]);
+    assert_eq!(body["profiles"].as_array().unwrap().len(), 2);
+
+    let changed = sandbox.run(&["profile", "set-default", "bob"]);
+    assert!(changed.status.success());
+    let implicit = sandbox.run(&["--json", "status"]);
+    assert!(implicit.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&implicit.stdout).unwrap();
+    assert_eq!(body["defaultProfile"], "bob");
+    assert_eq!(body["loggedIn"], true);
+    assert_eq!(body["tokenValid"], false);
+    assert_eq!(body["hasStoredCredentials"], false);
+    assert!(body["expiresAt"].is_string());
+    assert_eq!(body["expiresAt"], body["profiles"][1]["expiresAt"]);
+
+    let explicit = sandbox.run(&["--json", "status", "--profile", "alice"]);
+    assert!(explicit.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert_eq!(body["defaultProfile"], "bob");
+    assert_eq!(body["loggedIn"], true);
+    assert_eq!(body["tokenValid"], true);
+    assert_eq!(body["hasStoredCredentials"], true);
+    assert_eq!(body["expiresAt"], body["profiles"][0]["expiresAt"]);
+    assert_eq!(body["profiles"].as_array().unwrap().len(), 1);
+    assert_eq!(body["profiles"][0]["name"], "alice");
+
+    std::fs::remove_file(bob_token).unwrap();
+    let implicit = sandbox.run(&["--json", "status"]);
+    assert!(implicit.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&implicit.stdout).unwrap();
+    assert_eq!(body["loggedIn"], false);
+    assert_eq!(body["tokenValid"], false);
+    assert_eq!(body["hasStoredCredentials"], false);
+    assert!(body.get("expiresAt").is_some_and(|value| value.is_null()));
+    assert_eq!(body["profiles"][0]["tokenValid"], true);
 }
 
 #[test]

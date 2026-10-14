@@ -174,7 +174,17 @@ pub fn status(mode: OutputMode, selected: Option<&str>) -> anyhow::Result<()> {
         .map(|p| profile_status(p, &registry))
         .collect::<anyhow::Result<Vec<_>>>()?;
     if mode == OutputMode::Json {
+        // Preserve the single-profile JSON contract for existing consumers.
+        let active_status = if selected.is_some() {
+            statuses.first()
+        } else {
+            statuses.iter().find(|status| status["isDefault"] == true)
+        };
         return crate::format::print_json(&serde_json::json!({
+            "loggedIn": active_status.is_some_and(|status| status["loggedIn"] == true),
+            "tokenValid": active_status.is_some_and(|status| status["tokenValid"] == true),
+            "expiresAt": active_status.map(|status| status["expiresAt"].clone()),
+            "hasStoredCredentials": active_status.is_some_and(|status| status["hasStoredCredentials"] == true),
             "defaultProfile": registry.default_profile,
             "profiles": statuses,
             "storageBackend": secrets::backend_name(),

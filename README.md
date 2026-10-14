@@ -239,6 +239,13 @@ without `--profile` reauthenticates the current default. `refresh` and `logout`
 require `--profile` when multiple profiles exist. Transfers always use one
 profile and require `--profile` when more than one is configured.
 
+`status --json` keeps the existing top-level `loggedIn`, `tokenValid`,
+`expiresAt`, and `hasStoredCredentials` fields. They describe the selected
+profile, or the default when `--profile` is omitted. The `profiles` array
+contains per-profile status, and `defaultProfile` identifies the default.
+With no profiles configured, the top-level booleans are `false` and
+`expiresAt` is `null`.
+
 `--mask` is a global flag for sharing screenshots: it replaces sensitive values
 (amounts, account numbers, owner names, transaction descriptions, counterparties,
 savings rate) with `*****` in table output while keeping categories, dates, and
