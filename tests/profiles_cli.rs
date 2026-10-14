@@ -737,6 +737,47 @@ fn overlapping_profile_logins_do_not_overwrite_the_first_profiles_secrets() {
 }
 
 #[test]
+fn login_accepts_a_valid_callback_after_an_idle_connection_times_out() {
+    let sandbox = Sandbox::new();
+    let mut pending = start_profile_login(
+        &sandbox,
+        "personal",
+        "personal-id",
+        "personal-secret",
+        r#"{"access_token":"personal-access","refresh_token":"personal-refresh","expires_in":3600}"#,
+    );
+
+    let mut idle = std::net::TcpStream::connect(("127.0.0.1", pending.callback_port)).unwrap();
+    idle.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut byte = [0];
+    let closed = idle.read(&mut byte);
+    assert!(
+        matches!(closed, Ok(0))
+            || matches!(closed, Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+        "idle connection was not closed after its read timeout: {closed:?}"
+    );
+    assert!(
+        pending.child.try_wait().unwrap().is_none(),
+        "an idle connection must not terminate the BankID flow"
+    );
+
+    let (login, request) = finish_login(pending);
+    assert!(
+        login.status.success(),
+        "{}",
+        String::from_utf8_lossy(&login.stderr)
+    );
+    assert!(request.contains("personal-id"));
+    assert!(request.contains("personal-secret"));
+    let status = sandbox.run(&["--json", "status", "--profile", "personal"]);
+    assert!(status.status.success());
+    let body: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(body["profiles"][0]["loggedIn"], true);
+    assert_eq!(body["profiles"][0]["tokenValid"], true);
+}
+
+#[test]
 fn first_successful_profile_becomes_default() {
     let sandbox = Sandbox::new();
     let login = login_new_profile(&sandbox, "partner", "partner-id", "partner-secret");

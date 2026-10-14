@@ -11,7 +11,7 @@
 //! Per terms §3 the client secret has limited validity; a rejected secret here
 //! is mapped to [`Sb1Error::InvalidClientCredentials`] with a rotate-it message.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -236,7 +236,7 @@ fn wait_for_callback(
     // A single accept with a read timeout keeps this simple; the browser hits us
     // once. We loop only to skip unrelated requests (e.g. favicon).
     let deadline = std::time::Instant::now() + CALLBACK_TIMEOUT;
-    for conn in listener.incoming() {
+    'connections: for conn in listener.incoming() {
         if std::time::Instant::now() > deadline {
             break;
         }
@@ -249,9 +249,17 @@ fn wait_for_callback(
         let mut request = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
-            let n = stream
-                .read(&mut buf)
-                .map_err(|e| Sb1Error::AuthFlow(format!("reading OAuth callback: {e}")))?;
+            let n = match stream.read(&mut buf) {
+                Ok(n) => n,
+                // Browsers may open an idle connection before the real callback.
+                // Discard it after the read timeout and keep waiting for BankID.
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    continue 'connections;
+                }
+                Err(e) => {
+                    return Err(Sb1Error::AuthFlow(format!("reading OAuth callback: {e}")));
+                }
+            };
             if n == 0 {
                 break;
             }
